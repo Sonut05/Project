@@ -1,0 +1,15 @@
+{
+  "name": "rentit-p2p-fullstack",
+  "version": "1.0.0",
+  "description": "Simplified Full-Stack RentIt application split into a clean frontend and backend",
+  "private": true,
+  "scripts": {
+    "install-all": "npm install --prefix frontend && npm install --prefix backend",
+    "dev-frontend": "npm run dev --prefix frontend",
+    "dev-backend": "npm run dev --prefix backend",
+    "dev": "concurrently --kill-others \"npm run dev-frontend\" \"npm run dev-backend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
