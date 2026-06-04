@@ -8,7 +8,8 @@
     "dev-frontend": "npm run dev --prefix frontend",
     "dev-backend": "npm run dev --prefix backend",
     "dev": "concurrently --kill-others \"npm run dev-frontend\" \"npm run dev-backend\"",
-    "start": "node backend/src/server.js"
+    "start": "node backend/src/server.js",
+    "build": "npm install --prefix backend"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
