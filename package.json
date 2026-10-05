@@ -8,7 +8,11 @@
     "dev": "concurrently --kill-others \"npm run dev --prefix frontend\" \"npm run dev --prefix backend\"",
     "dev:frontend": "npm run dev --prefix frontend",
     "dev:backend": "npm run dev --prefix backend",
+    "dev-frontend": "npm run dev --prefix frontend",
+    "dev-backend": "npm run dev --prefix backend",
+    "start": "node backend/src/server.js",
     "build": "npm run build --prefix frontend",
+    "build:backend": "npm install --prefix backend",
     "lint": "npm run lint --prefix frontend",
     "test": "npm run test --prefix frontend && npm run test --prefix backend"
   },
