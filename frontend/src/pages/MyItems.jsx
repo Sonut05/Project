@@ -1,47 +1,124 @@
-import React, { useState, useEffect } from 'react';
-import { getDb, dbOps } from '../utils/mockDb';
+import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import ItemCard from '../components/ItemCard';
-import { PlusCircle, Info, ShieldAlert, Sparkles } from 'lucide-react';
+import ConfirmModal from '../components/ConfirmModal';
+import { PlusCircle } from 'lucide-react';
+import { useAuth } from '../context/useAuth.js';
+import { itemsApi } from '../api/items';
+import { requestsApi } from '../api/requests';
 
 export default function MyItems({ onOpenAddListing, onOpenEditListing, onViewUser, onViewItem, toast }) {
-  const [db, setDb] = useState(getDb());
+  const navigate = useNavigate();
+  const { user } = useAuth();
 
-  const refreshData = () => {
-    setDb(getDb());
-  };
+  const [myListings, setMyListings] = useState([]);
+  const [incomingRequests, setIncomingRequests] = useState([]);
+  const [loading, setLoading] = useState(Boolean(user));
+  const [error, setError] = useState(null);
+
+  // Confirm delete modal state
+  const [deleteModalItem, setDeleteModalItem] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const refreshData = useCallback(async () => {
+    if (!user) return;
+    try {
+      const [items, requests] = await Promise.all([
+        itemsApi.getItems({ lenderId: user.id }),
+        requestsApi.getIncoming()
+      ]);
+      setMyListings(items);
+      setIncomingRequests(requests);
+    } catch (err) {
+      setError(err.message || 'Failed to load your listings');
+    }
+  }, [user]);
 
   useEffect(() => {
-    refreshData();
-    window.addEventListener('rentit_db_update', refreshData);
-    return () => window.removeEventListener('rentit_db_update', refreshData);
-  }, []);
+    if (!user) return;
+    let isMounted = true;
+    async function load() {
+      try {
+        const [items, requests] = await Promise.all([
+          itemsApi.getItems({ lenderId: user.id }),
+          requestsApi.getIncoming()
+        ]);
+        if (isMounted) {
+          setMyListings(items);
+          setIncomingRequests(requests);
+        }
+      } catch (err) {
+        if (isMounted) setError(err.message || 'Failed to load your listings');
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      isMounted = false;
+    };
+  }, [user]);
 
-  const activeUserId = db.currentUserId || 'user-self';
-  const myListings = db.items.filter(item => item.lenderId === activeUserId);
+  const handleRequestDelete = (itemId) => {
+    const item = myListings.find((i) => i.id === itemId);
+    if (item) {
+      setDeleteModalItem(item);
+    }
+  };
 
-  const handleDeleteListing = (itemId) => {
-    const item = db.items.find(i => i.id === itemId);
-    if (confirm(`Are you absolutely sure you want to delete "${item?.name || 'this listing'}"? This action cannot be undone.`)) {
-      dbOps.removeItem(itemId);
-      toast('Listing deleted successfully! 🧹');
-      refreshData();
+  const handleConfirmDelete = async () => {
+    if (!deleteModalItem) return;
+    setIsDeleting(true);
+    try {
+      await itemsApi.deleteItem(deleteModalItem.id);
+      if (toast) {
+        toast('Listing removed or archived successfully! 🧹');
+      }
+      setDeleteModalItem(null);
+      await refreshData();
+    } catch (err) {
+      if (toast) {
+        toast(err.message || 'Failed to delete listing');
+      }
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleView = (itemId) => {
+    if (onViewItem) {
+      onViewItem(itemId);
+    } else {
+      navigate(`/items/${itemId}`);
+    }
+  };
+
+  const handleViewProfile = (userId) => {
+    if (onViewUser) {
+      onViewUser(userId);
+    } else {
+      navigate(`/profile/${userId}`);
     }
   };
 
   // Stats summaries
-  const availableCount = myListings.filter(i => i.availability === 'Available').length;
-  const rentedCount = myListings.filter(i => i.availability === 'Rented Out').length;
-  const totalEarnings = db.requests
-    .filter(req => req.lenderId === activeUserId && req.status === 'Completed')
-    .reduce((sum, req) => {
-      // Find item daily price to calculate earnings
-      const item = db.items.find(i => i.id === req.itemId) || { dailyPrice: 0 };
-      return sum + (req.totalDays * item.dailyPrice);
-    }, 0);
+  const availableCount = myListings.filter((i) => i.availability === 'Available').length;
+  const rentedCount = myListings.filter((i) => i.availability === 'Rented Out').length;
+  const totalEarnings = incomingRequests
+    .filter((req) => req.status === 'Completed')
+    .reduce((sum, req) => sum + (req.rentalAmount || 0), 0);
+
+  if (loading) {
+    return (
+      <div className="main-content" style={{ textAlign: 'center', padding: '60px 20px' }}>
+        <div style={{ display: 'inline-block', width: '32px', height: '32px', border: '3px solid var(--border-color)', borderTopColor: 'var(--accent-color)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <p style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>Loading your listings...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="main-content">
-      
       {/* Title Header Toolbar */}
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '28px', flexWrap: 'wrap', gap: '16px' }}>
         <div>
@@ -60,6 +137,12 @@ export default function MyItems({ onOpenAddListing, onOpenEditListing, onViewUse
           <PlusCircle size={18} /> Add New Listing
         </button>
       </header>
+
+      {error && (
+        <div style={{ padding: '12px 16px', backgroundColor: 'rgba(239, 68, 68, 0.1)', border: '1px solid var(--status-danger)', borderRadius: '8px', color: 'var(--status-danger)', marginBottom: '24px' }}>
+          {error}
+        </div>
+      )}
 
       {/* Listings statistics widget */}
       {myListings.length > 0 && (
@@ -105,13 +188,13 @@ export default function MyItems({ onOpenAddListing, onOpenEditListing, onViewUse
         </section>
       )}
 
-      {/* Empty State visual */}
+      {/* Empty State */}
       {myListings.length === 0 ? (
         <div 
           style={{ 
             textAlign: 'center', 
             padding: '80px 24px', 
-            backgroundColor: 'white', 
+            backgroundColor: 'var(--card-bg)', 
             border: '1px dashed var(--border-color)',
             borderRadius: '16px',
             boxShadow: 'var(--shadow-sm)',
@@ -120,9 +203,9 @@ export default function MyItems({ onOpenAddListing, onOpenEditListing, onViewUse
           }}
         >
           <div style={{ fontSize: '64px', marginBottom: '24px' }}>🤝</div>
-          <h3 style={{ fontSize: '20px', color: 'var(--text-primary)' }}>Share your spare items and earn pocket money!</h3>
+          <h3 style={{ fontSize: '20px', color: 'var(--text-primary)' }}>Share your spare items and earn with neighbors!</h3>
           <p style={{ color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '400px', margin: '8px auto 24px' }}>
-            List electric drills, ladders, cameras, or blenders. Neighbors nearby can rent them per day, and items are secured with deposit handoffs.
+            List electric drills, ladders, cameras, or appliances. Neighbors nearby can rent them per day, secured with refundable deposit handoffs.
           </p>
           <button onClick={onOpenAddListing} className="btn btn-primary" style={{ height: '48px' }}>
             List Your First Item Now
@@ -130,21 +213,31 @@ export default function MyItems({ onOpenAddListing, onOpenEditListing, onViewUse
         </div>
       ) : (
         <div className="grid-cols-responsive">
-          {myListings.map(item => (
+          {myListings.map((item) => (
             <div key={item.id}>
               <ItemCard 
                 item={item}
                 isOwner={true}
                 onEdit={onOpenEditListing}
-                onRemove={handleDeleteListing}
-                onViewUser={onViewUser}
-                onView={onViewItem}
+                onRemove={handleRequestDelete}
+                onViewUser={handleViewProfile}
+                onView={handleView}
               />
             </div>
           ))}
         </div>
       )}
 
+      {/* Accessible Confirm Modal for Delete */}
+      <ConfirmModal
+        isOpen={Boolean(deleteModalItem)}
+        title="Delete Listing"
+        message={`Are you sure you want to remove "${deleteModalItem?.name}"? If this item has previous completed rental history, it will be securely archived rather than deleted.`}
+        confirmText={isDeleting ? 'Removing...' : 'Delete Listing'}
+        isDanger={true}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteModalItem(null)}
+      />
     </div>
   );
 }

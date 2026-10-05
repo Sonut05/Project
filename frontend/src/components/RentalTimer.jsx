@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 
 export default function RentalTimer({ endDateStr }) {
   const [timeLeft, setTimeLeft] = useState('');
@@ -6,8 +6,9 @@ export default function RentalTimer({ endDateStr }) {
   const [isDueToday, setIsDueToday] = useState(false);
 
   useEffect(() => {
+    if (!endDateStr) return;
+
     const calculateTime = () => {
-      // Treat the end date as expiring at 23:59:59 of that day local time
       const end = new Date(endDateStr.includes('T') ? endDateStr : `${endDateStr}T23:59:59`);
       const now = new Date();
       const diff = end - now;
@@ -39,8 +40,10 @@ export default function RentalTimer({ endDateStr }) {
     return () => clearInterval(interval);
   }, [endDateStr]);
 
+  if (!endDateStr) return null;
+
   return (
-    <span 
+    <span
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -49,21 +52,17 @@ export default function RentalTimer({ endDateStr }) {
         borderRadius: '8px',
         fontSize: '11px',
         fontWeight: '700',
-        backgroundColor: isOverdue 
-          ? 'rgba(239, 68, 68, 0.1)' 
-          : isDueToday 
-            ? 'rgba(245, 158, 11, 0.1)' 
+        backgroundColor: isOverdue
+          ? 'rgba(239, 68, 68, 0.1)'
+          : isDueToday
+            ? 'rgba(245, 158, 11, 0.1)'
             : 'rgba(29, 158, 117, 0.1)',
-        color: isOverdue 
-          ? '#EF4444' 
-          : isDueToday 
-            ? '#F59E0B' 
-            : '#1D9E75',
+        color: isOverdue ? '#EF4444' : isDueToday ? '#F59E0B' : '#1D9E75',
         border: `1px solid ${
-          isOverdue 
-            ? 'rgba(239, 68, 68, 0.2)' 
-            : isDueToday 
-              ? 'rgba(245, 158, 11, 0.2)' 
+          isOverdue
+            ? 'rgba(239, 68, 68, 0.2)'
+            : isDueToday
+              ? 'rgba(245, 158, 11, 0.2)'
               : 'rgba(29, 158, 117, 0.2)'
         }`,
         transition: 'all 0.3s ease'

@@ -1,0 +1,173 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                    String          @id @default(uuid())
+  name                  String
+  email                 String          @unique
+  passwordHash          String
+  phone                 String?
+  avatarUrl             String?
+  city                  String?
+  privateAddress        String?         // Protected: Never exposed in public profile APIs
+  latitude              Float?
+  longitude             Float?
+  onboardingUseMode     String?         @default("both") // "borrow", "lend", "both"
+  emailVerifiedAt       DateTime?
+  onboardingCompletedAt DateTime?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  // Relations
+  listedItems           Item[]
+  borrowerRequests      RentalRequest[] @relation("BorrowerRequests")
+  lenderRequests        RentalRequest[] @relation("LenderRequests")
+  reviewsAuthored       Review[]        @relation("AuthorReviews")
+  activities            Activity[]
+  conversationsAsA      Conversation[]  @relation("ParticipantA")
+  conversationsAsB      Conversation[]  @relation("ParticipantB")
+  messagesSent          Message[]
+  refreshSessions       RefreshSession[]
+}
+
+model Item {
+  id             String          @id @default(uuid())
+  lenderId       String
+  lender         User            @relation(fields: [lenderId], references: [id], onDelete: Cascade)
+  name           String
+  description    String
+  category       String
+  dailyPrice     Decimal         @db.Decimal(10, 2)
+  depositAmount  Decimal         @default(0.00) @db.Decimal(10, 2)
+  condition      String          @default("Good")
+  locationLabel  String
+  latitude       Float
+  longitude      Float
+  listingStatus  String          @default("Active") // "Active", "Archived"
+  images         String[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  // Relations
+  rentalRequests RentalRequest[]
+
+  @@index([lenderId])
+  @@index([listingStatus])
+  @@index([category])
+  @@index([createdAt])
+  @@index([listingStatus, category])
+}
+
+model RentalRequest {
+  id            String    @id @default(uuid())
+  itemId        String
+  item          Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  lenderId      String
+  lender        User      @relation("LenderRequests", fields: [lenderId], references: [id], onDelete: Cascade)
+  borrowerId    String
+  borrower      User      @relation("BorrowerRequests", fields: [borrowerId], references: [id], onDelete: Cascade)
+  startDate     String    // YYYY-MM-DD
+  endDate       String    // YYYY-MM-DD
+  totalDays     Int
+  rentalAmount  Decimal   @db.Decimal(10, 2)
+  depositAmount Decimal   @default(0.00) @db.Decimal(10, 2)
+  totalAmount   Decimal   @db.Decimal(10, 2)
+  status        String    @default("Pending") // "Pending", "Accepted", "Rejected", "Cancelled", "Completed", "Disputed"
+  message       String?   @default("")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  acceptedAt    DateTime?
+  completedAt   DateTime?
+  cancelledAt   DateTime?
+  rejectedAt    DateTime?
+
+  // Relations
+  reviews       Review[]
+
+  @@index([itemId])
+  @@index([lenderId])
+  @@index([borrowerId])
+  @@index([status])
+  @@index([startDate, endDate])
+  @@index([itemId, status])
+}
+
+model Review {
+  id         String        @id @default(uuid())
+  requestId  String
+  request    RentalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  targetType String        // "item" or "user"
+  targetId   String        // itemId or userId
+  authorId   String
+  author     User          @relation("AuthorReviews", fields: [authorId], references: [id], onDelete: Cascade)
+  rating     Int           // 1 to 5
+  comment    String
+  createdAt  DateTime      @default(now())
+
+  @@unique([requestId, targetType, authorId])
+  @@index([targetType, targetId])
+  @@index([requestId])
+  @@index([authorId])
+}
+
+model Activity {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       String   // e.g. "REQUEST_CREATED", "REQUEST_ACCEPTED", "ITEM_RETURNED", "LISTING_CREATED"
+  message    String
+  entityType String?  // "item", "request", "review", etc.
+  entityId   String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Conversation {
+  id             String    @id @default(uuid())
+  participantAId String
+  participantBId String
+  participantA   User      @relation("ParticipantA", fields: [participantAId], references: [id], onDelete: Cascade)
+  participantB   User      @relation("ParticipantB", fields: [participantBId], references: [id], onDelete: Cascade)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  messages       Message[]
+
+  @@unique([participantAId, participantBId])
+  @@index([participantAId])
+  @@index([participantBId])
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  body           String
+  createdAt      DateTime     @default(now())
+  readAt         DateTime?
+
+  @@index([conversationId, createdAt])
+}
+
+model RefreshSession {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([tokenHash])
+}

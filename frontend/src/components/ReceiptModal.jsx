@@ -1,85 +1,82 @@
-import React from 'react';
+import { useRef } from 'react';
 import { X, Printer, CheckCircle, ArrowRight } from 'lucide-react';
-import { getDb } from '../utils/mockDb';
+import { formatDisplayDate } from '../utils/dateUtils.js';
+import { resolveImageUrl, ITEM_PLACEHOLDER } from '../utils/imageUrl.js';
 
 export default function ReceiptModal({ request, onClose }) {
-  const db = getDb();
-  
-  // Find item
-  const item = db.items.find(i => i.id === request.itemId) || {
-    name: 'Household Item',
-    category: 'General',
-    dailyPrice: 200,
-    depositAmount: 500,
-    images: ['https://images.unsplash.com/photo-1531685250784-7569952593d2?auto=format&fit=crop&q=80&w=150']
+  const overlayRef = useRef(null);
+  if (!request) return null;
+
+  const item = request.item || {
+    name: 'Rented Item',
+    category: 'Item',
+    dailyPrice: 0,
+    depositAmount: 0,
+    images: []
   };
 
-  // Find lender and borrower
-  const lender = db.users[request.lenderId] || { name: 'Lender User', avatar: '' };
-  const borrower = db.users[request.borrowerId] || { name: 'Borrower User', avatar: '' };
+  const lender = request.lender || { name: 'Lender', city: 'Neighborhood' };
+  const borrower = request.borrower || { name: 'Borrower', city: 'Neighborhood' };
 
   const days = request.totalDays || 1;
-  const rentTotal = days * item.dailyPrice;
-  const deposit = item.depositAmount || 0;
-  const total = rentTotal + deposit;
+  const rentalAmount = request.rentalAmount ?? days * (item.dailyPrice || 0);
+  const depositAmount = request.depositAmount ?? (item.depositAmount || 0);
+  const totalAmount = request.totalAmount ?? (rentalAmount + depositAmount);
 
-  // Formatted date generator
-  const formatDate = (dateStr) => {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-IN', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric'
-    });
-  };
+  const rawImage = (item.images && item.images.length > 0 && item.images[0]) || null;
+  const itemImg = resolveImageUrl(rawImage, ITEM_PLACEHOLDER);
 
   const handlePrint = () => {
-    // Add print class to the overlay, trigger print dialog, and clean up!
-    const overlay = document.querySelector('.receipt-overlay');
-    if (overlay) {
-      overlay.classList.add('print-target');
+    if (overlayRef.current) {
+      overlayRef.current.classList.add('print-target');
       window.print();
-      overlay.classList.remove('print-target');
+      overlayRef.current.classList.remove('print-target');
     }
   };
 
   return (
-    <div className="modal-overlay receipt-overlay" style={{ zIndex: 1100 }}>
-      <div 
-        className="modal-content" 
-        style={{ 
-          maxWidth: '500px', 
-          border: '2px solid var(--accent-color)', 
+    <div
+      ref={overlayRef}
+      className="modal-overlay receipt-overlay"
+      style={{ zIndex: 1100 }}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="receipt-title"
+    >
+      <div
+        className="modal-content"
+        style={{
+          maxWidth: '500px',
+          border: '2px solid var(--accent-color)',
           padding: 0,
           overflow: 'hidden'
         }}
       >
-        
         {/* Header Bar */}
-        <div 
+        <div
           className="no-print"
-          style={{ 
-            backgroundColor: 'var(--accent-color)', 
-            color: 'white', 
-            padding: '20px 24px', 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center' 
+          style={{
+            backgroundColor: 'var(--accent-color)',
+            color: 'white',
+            padding: '20px 24px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center'
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <CheckCircle size={22} />
-            <h2 style={{ fontSize: '18px', color: 'white', fontFamily: 'var(--font-display)' }}>
+            <h2 id="receipt-title" style={{ fontSize: '18px', color: 'white', fontFamily: 'var(--font-display)', margin: 0 }}>
               Transaction Receipt
             </h2>
           </div>
-          <button 
+          <button
             onClick={onClose}
-            style={{ 
-              background: 'none', 
-              border: 'none', 
-              color: 'white', 
+            aria-label="Close receipt"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'white',
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
@@ -93,31 +90,33 @@ export default function ReceiptModal({ request, onClose }) {
 
         {/* Receipt Body */}
         <div style={{ padding: '32px 24px' }}>
-          
           {/* Printable Header */}
           <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-            <h3 style={{ fontSize: '24px', fontFamily: 'var(--font-display)', color: 'var(--accent-color)', fontWeight: '700' }}>
+            <h3 style={{ fontSize: '24px', fontFamily: 'var(--font-display)', color: 'var(--accent-color)', fontWeight: '700', margin: 0 }}>
               RentIt Receipt
             </h3>
             <span style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginTop: '4px' }}>
-              REFERENCE ID: <strong style={{ color: 'var(--text-primary)' }}>{request.id.toUpperCase()}</strong>
+              REFERENCE ID: <strong style={{ color: 'var(--text-primary)' }}>{request.id}</strong>
             </span>
           </div>
 
           {/* Item details */}
-          <div 
-            style={{ 
-              display: 'flex', 
-              gap: '16px', 
-              paddingBottom: '20px', 
+          <div
+            style={{
+              display: 'flex',
+              gap: '16px',
+              paddingBottom: '20px',
               borderBottom: '1px solid var(--border-color)',
               marginBottom: '20px'
             }}
           >
-            <img 
-              src={item.images[0]} 
-              alt={item.name} 
+            <img
+              src={itemImg}
+              alt={item.name}
               style={{ width: '80px', height: '80px', objectFit: 'cover', borderRadius: '8px' }}
+              onError={(e) => {
+                e.currentTarget.src = ITEM_PLACEHOLDER;
+              }}
             />
             <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
               <span style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '600' }}>
@@ -133,12 +132,12 @@ export default function ReceiptModal({ request, onClose }) {
           </div>
 
           {/* Parties involved */}
-          <div 
-            style={{ 
-              display: 'grid', 
-              gridTemplateColumns: '1fr 1fr', 
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
               gap: '20px',
-              paddingBottom: '20px', 
+              paddingBottom: '20px',
               borderBottom: '1px solid var(--border-color)',
               marginBottom: '20px'
             }}
@@ -148,20 +147,20 @@ export default function ReceiptModal({ request, onClose }) {
                 LENDER
               </span>
               <strong style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{lender.name}</strong>
-              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block' }}>{lender.city}</span>
+              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block' }}>{lender.city || 'Neighborhood'}</span>
             </div>
             <div style={{ textAlign: 'right' }}>
               <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'block', fontWeight: '600' }}>
                 BORROWER
               </span>
               <strong style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{borrower.name}</strong>
-              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block' }}>{borrower.city}</span>
+              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block' }}>{borrower.city || 'Neighborhood'}</span>
             </div>
           </div>
 
           {/* Rental Dates */}
-          <div 
-            style={{ 
+          <div
+            style={{
               backgroundColor: 'var(--bg-primary)',
               borderRadius: '12px',
               padding: '16px',
@@ -174,12 +173,12 @@ export default function ReceiptModal({ request, onClose }) {
           >
             <div>
               <span style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'block', fontWeight: '600' }}>FROM</span>
-              <strong style={{ fontSize: '13px' }}>{formatDate(request.startDate)}</strong>
+              <strong style={{ fontSize: '13px' }}>{formatDisplayDate(request.startDate)}</strong>
             </div>
             <ArrowRight size={16} style={{ color: 'var(--text-muted)' }} />
             <div style={{ textAlign: 'right' }}>
               <span style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'block', fontWeight: '600' }}>TO</span>
-              <strong style={{ fontSize: '13px' }}>{formatDate(request.endDate)}</strong>
+              <strong style={{ fontSize: '13px' }}>{formatDisplayDate(request.endDate)}</strong>
             </div>
             <div style={{ borderLeft: '1px solid var(--border-color)', paddingLeft: '12px', marginLeft: '12px' }}>
               <span style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'block', fontWeight: '600' }}>DURATION</span>
@@ -187,23 +186,23 @@ export default function ReceiptModal({ request, onClose }) {
             </div>
           </div>
 
-          {/* Pricing ledger list */}
+          {/* Pricing ledger */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '24px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
               <span style={{ color: 'var(--text-secondary)' }}>Rental Cost ({days} days × ₹{item.dailyPrice})</span>
-              <span style={{ fontWeight: '500' }}>₹{rentTotal}</span>
+              <span style={{ fontWeight: '500' }}>₹{rentalAmount}</span>
             </div>
-            {deposit > 0 && (
+            {depositAmount > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
                 <span style={{ color: 'var(--text-secondary)' }}>Refundable Item Deposit</span>
-                <span style={{ fontWeight: '500' }}>₹{deposit}</span>
+                <span style={{ fontWeight: '500' }}>₹{depositAmount}</span>
               </div>
             )}
-            <div 
-              style={{ 
-                display: 'flex', 
-                justifyContent: 'space-between', 
-                fontSize: '18px', 
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                fontSize: '18px',
                 fontWeight: '700',
                 borderTop: '2px solid var(--border-color)',
                 paddingTop: '12px',
@@ -211,31 +210,31 @@ export default function ReceiptModal({ request, onClose }) {
                 color: 'var(--text-primary)'
               }}
             >
-              <span>Grand Total</span>
-              <span style={{ color: 'var(--accent-color)', fontFamily: 'var(--font-display)' }}>₹{total}</span>
+              <span>Total Amount Due</span>
+              <span style={{ color: 'var(--accent-color)', fontFamily: 'var(--font-display)' }}>₹{totalAmount}</span>
             </div>
           </div>
 
-          {/* Action buttons (hidden in print automatically) */}
+          {/* Actions */}
           <div className="no-print" style={{ display: 'flex', gap: '12px' }}>
-            <button 
+            <button
+              type="button"
               onClick={onClose}
               className="btn btn-outline"
               style={{ flex: 1 }}
             >
-              Close Receipt
+              Close
             </button>
-            <button 
+            <button
+              type="button"
               onClick={handlePrint}
               className="btn btn-primary"
-              style={{ flex: 2 }}
+              style={{ flex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
             >
-              <Printer size={18} /> Download as PDF
+              <Printer size={18} /> Print / Save as PDF
             </button>
           </div>
-
         </div>
-
       </div>
     </div>
   );

@@ -1,997 +1,780 @@
-import React, { useState, useEffect } from 'react';
-import { getDb, calculateDistance, getCoordinatesForAddress } from '../utils/mockDb';
-import LeafletMap from '../components/LeafletMap';
-import ItemCard from '../components/ItemCard';
-import { SlidersHorizontal, MapPin, Grid, List, Search, RefreshCw, X, Filter } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { SlidersHorizontal, MapPin, Grid, List, Search, RefreshCw, X, Navigation } from 'lucide-react';
+import LeafletMap from '../components/LeafletMap.jsx';
+import ItemCard from '../components/ItemCard.jsx';
+import { useAuth } from '../context/useAuth.js';
+import { itemsApi } from '../api/items.js';
+import { geocodeApi } from '../api/geocode.js';
 
-// Fallback Indian locations in case geocoding is offline or rate-limited
-const FALLBACK_LOCATIONS = [
-  { name: "HSR Layout, Bangalore, Karnataka", lat: 12.9100, lng: 77.6400 },
-  { name: "Jayanagar, Bangalore, Karnataka", lat: 12.9300, lng: 77.5800 },
-  { name: "Indiranagar, Bangalore, Karnataka", lat: 12.9780, lng: 77.6400 },
-  { name: "Koramangala, Bangalore, Karnataka", lat: 12.9350, lng: 77.6250 },
-  { name: "Whitefield, Bangalore, Karnataka", lat: 12.9698, lng: 77.7500 },
-  { name: "Hebbal, Bangalore, Karnataka", lat: 13.0350, lng: 77.5970 },
-  { name: "Mumbai, Maharashtra", lat: 19.0760, lng: 72.8777 },
-  { name: "Delhi, NCR", lat: 28.6139, lng: 77.2090 },
-  { name: "Noida, Uttar Pradesh", lat: 28.5355, lng: 77.3910 },
-  { name: "Gurgaon, Haryana", lat: 28.4595, lng: 77.0266 },
-  { name: "Hyderabad, Telangana", lat: 17.3850, lng: 78.4867 },
-  { name: "Pune, Maharashtra", lat: 18.5204, lng: 73.8567 },
-  { name: "Chennai, Tamil Nadu", lat: 13.0827, lng: 80.2707 },
-  { name: "Kolkata, West Bengal", lat: 22.5726, lng: 88.3639 },
-  { name: "Goa", lat: 15.2993, lng: 74.1240 },
-  { name: "Ahmedabad, Gujarat", lat: 23.0225, lng: 72.5714 },
-  { name: "Vadodara, Gujarat", lat: 22.3072, lng: 73.1812 },
-  { name: "Jaipur, Rajasthan", lat: 26.9124, lng: 75.7873 }
+const CATEGORIES = [
+  'All Categories',
+  'Power Tools',
+  'Photography',
+  'Electronics',
+  'Outdoors',
+  'Home & Garden',
+  'Sports & Fitness',
+  'Kitchen & Appliances',
+  'General'
 ];
 
 export default function Browse({ onViewItem, onViewUser, toast }) {
-  const [db, setDb] = useState(getDb());
-  
-  const selfUser = db.users[db.currentUserId || 'user-self'];
+  const navigate = useNavigate();
+  const { user } = useAuth();
 
-  // User Location coordinates: Defaulting to user-self profile coords or standard Central Bangalore
-  const [userLat, setUserLat] = useState(() => {
-    let lat = selfUser?.lat || 12.9716;
-    if (lat === 12.9716 && selfUser?.city && !selfUser.city.toLowerCase().includes('bangalore') && !selfUser.city.toLowerCase().includes('bengaluru')) {
-      const coords = getCoordinatesForAddress('', selfUser.city);
-      if (coords.lat !== 12.9716) lat = coords.lat;
-    }
-    return lat;
-  });
-  const [userLng, setUserLng] = useState(() => {
-    let lng = selfUser?.lng || 77.5946;
-    if (lng === 77.5946 && selfUser?.city && !selfUser.city.toLowerCase().includes('bangalore') && !selfUser.city.toLowerCase().includes('bengaluru')) {
-      const coords = getCoordinatesForAddress('', selfUser.city);
-      if (coords.lng !== 77.5946) lng = coords.lng;
-    }
-    return lng;
-  });
+  // Coordinates state - default to authenticated user's location if available, otherwise null (NO fake Bangalore coordinates)
+  const [userLat, setUserLat] = useState(typeof user?.latitude === 'number' ? user.latitude : null);
+  const [userLng, setUserLng] = useState(typeof user?.longitude === 'number' ? user.longitude : null);
+  const [locationLabel, setLocationLabel] = useState(user?.city || (user?.latitude ? 'Saved Location' : 'All Locations'));
 
-  // Search & Filter state
+  // Filter states
   const [searchQuery, setSearchQuery] = useState('');
-  const [locationSearchQuery, setLocationSearchQuery] = useState(selfUser?.city || 'Bangalore Central');
-  const [selectedCategories, setSelectedCategories] = useState([]);
-  const [priceMax, setPriceMax] = useState(2000);
+  const [selectedCategory, setSelectedCategory] = useState('All Categories');
+  const [priceMax, setPriceMax] = useState(5000);
   const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
   const [minRating, setMinRating] = useState(0);
-  const [distanceRadius, setDistanceRadius] = useState(100); // default 100 km (Anywhere)
-  const [selectedConditions, setSelectedConditions] = useState([]);
-  const [sortBy, setSortBy] = useState('nearest');
+  const [distanceRadius, setDistanceRadius] = useState(25); // km
+  const [sortBy, setSortBy] = useState('newest'); // 'newest', 'price-low', 'price-high'
 
-  // UI state
-  const [isFilterOpenMobile, setIsFilterOpenMobile] = useState(false);
-  const [viewType, setViewType] = useState('grid'); // grid or list
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [showLocationSuggestions, setShowLocationSuggestions] = useState(false);
-  const [locationSuggestions, setLocationSuggestions] = useState(FALLBACK_LOCATIONS.slice(0, 5));
-  const [isLoadingLocations, setIsLoadingLocations] = useState(false);
+  // Items from backend
+  const [items, setItems] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // Location search suggestions
+  const [locationQuery, setLocationQuery] = useState('');
+  const [locationSuggestions, setLocationSuggestions] = useState([]);
+  const [showLocSuggestions, setShowLocSuggestions] = useState(false);
+  const [activeLocIndex, setActiveLocIndex] = useState(-1);
+  const [isLocating, setIsLocating] = useState(false);
+
+  // Items view mode
+  const [viewType, setViewType] = useState('grid');
+  const [isMapCollapsed, setIsMapCollapsed] = useState(false);
+
+  // Fetch items from backend API with AbortSignal support to avoid race conditions
+  const fetchItems = useCallback(async (signal) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const hasCoords = typeof userLat === 'number' && typeof userLng === 'number' && !isNaN(userLat) && !isNaN(userLng);
+      const isAnywhere = distanceRadius === 'anywhere' || distanceRadius === null || distanceRadius === 0;
+      const filters = {
+        category: selectedCategory !== 'All Categories' ? selectedCategory : undefined,
+        search: searchQuery.trim() || undefined,
+        maxPrice: priceMax,
+        availableOnly: showOnlyAvailable ? 'true' : undefined,
+        minRating: minRating > 0 ? minRating : undefined,
+        lat: hasCoords ? userLat : undefined,
+        lng: hasCoords ? userLng : undefined,
+        radius: (hasCoords && !isAnywhere) ? distanceRadius : undefined
+      };
+
+      const data = await itemsApi.getItems(filters, signal);
+      const itemsList = Array.isArray(data) ? data : (data?.items || []);
+
+      // Client sort for secondary ordering
+      let sorted = [...itemsList];
+      if (sortBy === 'price-low') {
+        sorted.sort((a, b) => a.dailyPrice - b.dailyPrice);
+      } else if (sortBy === 'price-high') {
+        sorted.sort((a, b) => b.dailyPrice - a.dailyPrice);
+      } else {
+        // newest
+        sorted.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      }
+
+      setItems(sorted);
+    } catch (err) {
+      if (err.name === 'AbortError' || signal?.aborted) {
+        return; // Request was aborted due to newer query; ignore silently
+      }
+      setError(err.message || 'Failed to fetch items');
+      if (toast) toast(`Error loading items: ${err.message}`);
+    } finally {
+      if (!signal?.aborted) {
+        setIsLoading(false);
+      }
+    }
+  }, [selectedCategory, searchQuery, priceMax, showOnlyAvailable, minRating, userLat, userLng, distanceRadius, sortBy, toast]);
 
   useEffect(() => {
-    if (!locationSearchQuery.trim()) {
-      setLocationSuggestions(FALLBACK_LOCATIONS.slice(0, 5));
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetchItems(controller.signal);
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [fetchItems]);
+
+  // Debounced geocoder for location search
+  useEffect(() => {
+    if (!locationQuery.trim() || locationQuery.trim().length < 2) {
       return;
     }
 
-    // Auto-snap coordinates as the user types a known offline city keyword (like Vadodara) to prevent geofencing them out
-    const queryLower = locationSearchQuery.toLowerCase();
-    if (queryLower.includes('vadodara') || queryLower.includes('baroda')) {
-      setUserLat(22.3072);
-      setUserLng(73.1812);
-    } else if (queryLower.includes('ahmedabad')) {
-      setUserLat(23.0225);
-      setUserLng(72.5714);
-    } else if (queryLower.includes('mumbai') || queryLower.includes('bombay')) {
-      setUserLat(19.0760);
-      setUserLng(72.8777);
-    } else if (queryLower.includes('delhi') || queryLower.includes('ncr')) {
-      setUserLat(28.6139);
-      setUserLng(77.2090);
-    } else if (queryLower.includes('bangalore') || queryLower.includes('bengaluru')) {
-      setUserLat(12.9716);
-      setUserLng(77.5946);
-    } else if (queryLower.includes('pune')) {
-      setUserLat(18.5204);
-      setUserLng(73.8567);
-    } else if (queryLower.includes('chennai') || queryLower.includes('madras')) {
-      setUserLat(13.0827);
-      setUserLng(80.2707);
-    } else if (queryLower.includes('hyderabad')) {
-      setUserLat(17.3850);
-      setUserLng(78.4867);
-    } else if (queryLower.includes('kolkata') || queryLower.includes('calcutta')) {
-      setUserLat(22.5726);
-      setUserLng(88.3639);
-    } else if (queryLower.includes('jaipur')) {
-      setUserLat(26.9124);
-      setUserLng(75.7873);
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const results = await geocodeApi.search(locationQuery, controller.signal);
+        setLocationSuggestions(results || []);
+      } catch (err) {
+        if (err.name !== 'AbortError' && !controller.signal.aborted) {
+          // ignore geocode error
+        }
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [locationQuery]);
+
+  // Handle explicit selection of a location suggestion
+  const handleSelectLocation = (s) => {
+    setUserLat(s.latitude);
+    setUserLng(s.longitude);
+    setLocationLabel(s.city || s.label);
+    setLocationQuery('');
+    setShowLocSuggestions(false);
+    setActiveLocIndex(-1);
+    if (toast) toast(`Location updated to ${s.city || s.label} 📍`);
+  };
+
+  const handleLocationKeyDown = (e) => {
+    if (!showLocSuggestions || locationSuggestions.length === 0) {
+      if (e.key === 'ArrowDown' && locationSuggestions.length > 0) {
+        setShowLocSuggestions(true);
+        setActiveLocIndex(0);
+        e.preventDefault();
+      }
+      return;
     }
 
-    const delayDebounce = setTimeout(async () => {
-      setIsLoadingLocations(true);
-      try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=in&limit=5&q=${encodeURIComponent(locationSearchQuery)}`
-        );
-        const data = await response.json();
-        
-        let suggestions = [];
-        if (data && Array.isArray(data) && data.length > 0) {
-          suggestions = data.map(item => ({
-            name: item.display_name,
-            lat: parseFloat(item.lat),
-            lng: parseFloat(item.lon)
-          }));
-        }
-
-        // If Nominatim rate-limits or has no suggestions, or to guarantee local fallback cities show up
-        const localMatches = FALLBACK_LOCATIONS.filter(loc =>
-          loc.name.toLowerCase().includes(queryLower)
-        );
-
-        // Deduplicate and merge suggestions
-        const merged = [...suggestions];
-        localMatches.forEach(match => {
-          if (!merged.some(m => m.name.toLowerCase().includes(match.name.toLowerCase()) || match.name.toLowerCase().includes(m.name.toLowerCase()))) {
-            merged.push(match);
-          }
-        });
-
-        setLocationSuggestions(merged.slice(0, 5));
-      } catch (error) {
-        console.error("Geocoding error:", error);
-        const filtered = FALLBACK_LOCATIONS.filter(loc =>
-          loc.name.toLowerCase().includes(queryLower)
-        );
-        setLocationSuggestions(filtered.slice(0, 5));
-      } finally {
-        setIsLoadingLocations(false);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveLocIndex((prev) => (prev < locationSuggestions.length - 1 ? prev + 1 : 0));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveLocIndex((prev) => (prev > 0 ? prev - 1 : locationSuggestions.length - 1));
+    } else if (e.key === 'Enter') {
+      if (activeLocIndex >= 0 && locationSuggestions[activeLocIndex]) {
+        e.preventDefault();
+        handleSelectLocation(locationSuggestions[activeLocIndex]);
       }
-    }, 400);
+    } else if (e.key === 'Escape') {
+      setShowLocSuggestions(false);
+      setActiveLocIndex(-1);
+    }
+  };
 
-    return () => clearTimeout(delayDebounce);
-  }, [locationSearchQuery]);
+  const handleClearLocation = () => {
+    setUserLat(null);
+    setUserLng(null);
+    setLocationLabel('All Locations');
+    setLocationQuery('');
+    if (toast) toast('Location filter cleared (showing all listings)');
+  };
 
-  useEffect(() => {
-    const handleUpdate = () => {
-      const freshDb = getDb();
-      setDb(freshDb);
-      const self = freshDb.users[freshDb.currentUserId || 'user-self'];
-      if (self) {
-        let lat = self.lat || 12.9716;
-        let lng = self.lng || 77.5946;
-        if (lat === 12.9716 && lng === 77.5946 && self.city && !self.city.toLowerCase().includes('bangalore') && !self.city.toLowerCase().includes('bengaluru')) {
-          const coords = getCoordinatesForAddress('', self.city);
-          if (coords.lat !== 12.9716 || coords.lng !== 77.5946) {
-            lat = coords.lat;
-            lng = coords.lng;
-          }
-        }
+  const handleUseCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      if (toast) toast('Geolocation is not supported by your browser.');
+      return;
+    }
+
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
         setUserLat(lat);
         setUserLng(lng);
-        setLocationSearchQuery(self.city || 'Bangalore Central');
-      }
-    };
-    window.addEventListener('rentit_db_update', handleUpdate);
-    return () => window.removeEventListener('rentit_db_update', handleUpdate);
-  }, []);
 
-  const categoriesList = [
-    'Electronics', 'Tools & Hardware', 'Sports & Fitness', 'Furniture & Home', 
-    'Kitchen & Appliances', 'Vehicles', 'Books & Education', 'Other'
-  ];
-
-  // Geolocation detector on load
-  const handleAutoDetectLocation = () => {
-    const self = db.users[db.currentUserId || 'user-self'];
-    if (self && self.hasCompletedOnboarding && self.city) {
-      let lat = self.lat || 12.9716;
-      let lng = self.lng || 77.5946;
-      if (lat === 12.9716 && lng === 77.5946 && !self.city.toLowerCase().includes('bangalore') && !self.city.toLowerCase().includes('bengaluru')) {
-        const coords = getCoordinatesForAddress('', self.city);
-        if (coords.lat !== 12.9716 || coords.lng !== 77.5946) {
-          lat = coords.lat;
-          lng = coords.lng;
+        try {
+          const rev = await geocodeApi.reverse(lat, lng);
+          const label = rev?.city || rev?.label || `${lat.toFixed(3)}, ${lng.toFixed(3)}`;
+          setLocationLabel(label);
+          if (toast) toast(`Location set to ${label} 📍`);
+        } catch {
+          setLocationLabel(`${lat.toFixed(3)}, ${lng.toFixed(3)}`);
+          if (toast) toast('Location updated from device GPS 📍');
+        } finally {
+          setIsLocating(false);
         }
-      }
-      setUserLat(lat);
-      setUserLng(lng);
-      setLocationSearchQuery(self.city || 'Bangalore Central');
-      return;
-    }
-
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setUserLat(pos.coords.latitude);
-          setUserLng(pos.coords.longitude);
-          toast('Location successfully synchronized! 📍');
-        },
-        () => {
-          // Default coordinate values are already set
-        }
-      );
-    }
+      },
+      (err) => {
+        setIsLocating(false);
+        const msg = err.code === 1 ? 'Permission denied.' : err.code === 2 ? 'Location unavailable.' : 'Location request timed out.';
+        if (toast) toast(`Could not retrieve your location: ${msg}`);
+      },
+      { timeout: 8000 }
+    );
   };
 
-  useEffect(() => {
-    handleAutoDetectLocation();
-  }, []);
-
-  // Category selection toggle
-  const handleToggleCategory = (cat) => {
-    if (selectedCategories.includes(cat)) {
-      setSelectedCategories(selectedCategories.filter(c => c !== cat));
-    } else {
-      setSelectedCategories([...selectedCategories, cat]);
-    }
+  const handleItemClick = (id) => {
+    if (onViewItem) onViewItem(id);
+    else navigate(`/items/${id}`);
   };
 
-  // Condition selection toggle
-  const handleToggleCondition = (cond) => {
-    if (selectedConditions.includes(cond)) {
-      setSelectedConditions(selectedConditions.filter(c => c !== cond));
-    } else {
-      setSelectedConditions([...selectedConditions, cond]);
-    }
+  const handleUserClick = (id) => {
+    if (onViewUser) onViewUser(id);
+    else navigate(`/profile/${id}`);
   };
 
-  // Count active filters to show count badge ("Filters · 3")
-  const getActiveFilterCount = () => {
-    let count = 0;
-    if (selectedCategories.length > 0) count += 1;
-    if (priceMax < 2000) count += 1;
-    if (showOnlyAvailable) count += 1;
-    if (minRating > 0) count += 1;
-    if (distanceRadius !== 100) count += 1;
-    if (selectedConditions.length > 0) count += 1;
-    return count;
-  };
-
-  const handleClearFilters = () => {
-    setSelectedCategories([]);
-    setPriceMax(2000);
+  const clearAllFilters = () => {
+    setSearchQuery('');
+    setSelectedCategory('All Categories');
+    setPriceMax(5000);
     setShowOnlyAvailable(false);
     setMinRating(0);
-    setDistanceRadius(100);
-    setSelectedConditions([]);
-    setSearchQuery('');
-    setSortBy('nearest');
-    toast('All filters cleared instantly! 🧹');
+    setDistanceRadius(25);
+    setSortBy('newest');
   };
-
-  // Perform filtration logic
-  const getFilteredItems = () => {
-    return db.items
-      .map(item => {
-        // Calculate dynamic haversine distance
-        const distance = calculateDistance(userLat, userLng, item.lat, item.lng);
-        // Calculate dynamic rating
-        const rating = item.reviews.length > 0
-          ? (item.reviews.reduce((s, r) => s + r.rating, 0) / item.reviews.length)
-          : 5.0; // Assume 5.0 default rating for new item listings
-
-        return { ...item, distance, rating };
-      })
-      .filter(item => {
-        // 1. Search Query (Matches name, description, category)
-        if (searchQuery.trim()) {
-          const query = searchQuery.toLowerCase();
-          const matchName = item.name.toLowerCase().includes(query);
-          const matchDesc = item.description.toLowerCase().includes(query);
-          const matchCat = item.category.toLowerCase().includes(query);
-          if (!matchName && !matchDesc && !matchCat) return false;
-        }
-
-        // 2. Category multi-select
-        if (selectedCategories.length > 0 && !selectedCategories.includes(item.category)) {
-          return false;
-        }
-
-        // 3. Price slider (2000 is treated as ₹2000+ Unlimited)
-        if (priceMax < 2000 && item.dailyPrice > priceMax) {
-          return false;
-        }
-
-        // 4. Availability
-        if (item.availability !== 'Available') {
-          return false;
-        }
-
-        // 5. Rating selector
-        if (minRating > 0 && item.rating < minRating) {
-          return false;
-        }
-
-        // 6. Distance Slider geofence (100 is treated as Anywhere)
-        if (distanceRadius < 100 && item.distance > distanceRadius) {
-          return false;
-        }
-
-        // 7. Condition selection
-        if (selectedConditions.length > 0 && !selectedConditions.includes(item.condition)) {
-          return false;
-        }
-
-        // Exclude own items from browse exploration to keep P2P focus pure
-        if (item.lenderId === (db.currentUserId || 'user-self')) {
-          return false;
-        }
-
-        return true;
-      })
-      .sort((a, b) => {
-        // 8. Dynamic Sorting selections
-        if (sortBy === 'nearest') return a.distance - b.distance;
-        if (sortBy === 'price-low') return a.dailyPrice - b.dailyPrice;
-        if (sortBy === 'price-high') return b.dailyPrice - a.dailyPrice;
-        if (sortBy === 'rating') return b.rating - a.rating;
-        // Seeded IDs are chronologically generated via date timestamps
-        if (sortBy === 'newest') return b.id.localeCompare(a.id);
-        return 0;
-      });
-  };
-
-  const filteredItems = getFilteredItems();
-
-  // Geocode location search and glide the map to it smoothly
-  const handleLocationSelect = (loc) => {
-    setLocationSearchQuery(loc.name);
-    setShowLocationSuggestions(false);
-    setUserLat(loc.lat);
-    setUserLng(loc.lng);
-    toast(`Searching items in ${loc.name.split(',')[0]}! 📍`);
-  };
-
-  // Autocomplete Suggestions for Search Bar
-  const autocompleteSuggestions = searchQuery.trim() 
-    ? categoriesList
-        .concat(['drill', 'camera', 'cycle', 'mixer', 'tent', 'mower', 'projector', 'table'])
-        .filter(keyword => keyword.toLowerCase().includes(searchQuery.toLowerCase()))
-        .slice(0, 5)
-    : [];
 
   return (
-    <div className="main-content browse-page">
-      
-      {/* 1. Integrated Header Search Bar */}
-      <div 
-        style={{ 
-          display: 'flex', 
-          flexDirection: 'column', 
-          gap: '16px', 
-          marginBottom: '24px',
-          position: 'relative'
-        }}
-      >
-        {/* Dual Input Search Bar (Products + Location) */}
-        <div style={{ 
-          display: 'flex', 
-          gap: '12px', 
-          width: '100%',
-          flexWrap: 'wrap'
-        }}>
-          {/* A. Product Search */}
-          <div style={{ position: 'relative', flex: '2 1 300px' }}>
-            <Search size={20} style={{ position: 'absolute', left: '16px', top: '14px', color: 'var(--text-muted)' }} />
-            <input 
+    <div className="main-content">
+      <div style={{ maxWidth: '1440px', margin: '0 auto' }}>
+        {/* Title Header Toolbar */}
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '28px', flexWrap: 'wrap', gap: '16px' }}>
+          <div>
+            <h1 style={{ fontSize: 'var(--text-xl)', fontFamily: 'var(--font-display)', fontWeight: '700' }}>
+              Browse Neighborhood Items
+            </h1>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginTop: '2px' }}>
+              Near <strong>{locationLabel}</strong> • {items.length} {items.length === 1 ? 'item' : 'items'} found
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              type="button"
+              onClick={fetchItems}
+              disabled={isLoading}
+              className="btn btn-secondary"
+              aria-label="Refresh items"
+            >
+              <RefreshCw size={16} className={isLoading ? 'spin' : ''} />
+              <span>Refresh</span>
+            </button>
+          </div>
+        </header>
+
+        {/* Search & Location Bar */}
+        <div className="browse-search-grid" style={{ marginBottom: '24px' }}>
+          {/* Item Search Input */}
+          <div style={{ position: 'relative' }}>
+            <Search
+              size={18}
+              style={{
+                position: 'absolute',
+                left: '14px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                color: 'var(--text-muted)',
+                pointerEvents: 'none'
+              }}
+            />
+            <input
               type="text"
               className="form-control"
-              style={{ paddingLeft: '48px', height: '48px', borderRadius: 'var(--radius-full)' }}
-              placeholder="Search for a drill, camera, cycle, mixer..."
+              style={{ paddingLeft: '44px', height: '46px' }}
+              placeholder="Search items, tools, cameras, camping gear..."
               value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setShowSuggestions(true);
-              }}
-              onFocus={() => setShowSuggestions(true)}
-              onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+              onChange={(e) => setSearchQuery(e.target.value)}
             />
-            {/* Realtime Autocomplete dropdown */}
-            {showSuggestions && autocompleteSuggestions.length > 0 && (
-              <div 
-                style={{ 
-                  position: 'absolute', 
-                  top: '54px', 
-                  left: '12px', 
-                  right: '12px', 
-                  backgroundColor: 'white', 
-                  border: '1px solid var(--border-color)',
-                  borderRadius: '12px',
-                  boxShadow: 'var(--shadow-lg)',
-                  zIndex: 1000,
-                  overflow: 'hidden'
-                }}
-              >
-                {autocompleteSuggestions.map((s, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => {
-                      setSearchQuery(s);
-                      setShowSuggestions(false);
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '12px 20px',
-                      textAlign: 'left',
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontSize: '14px',
-                      color: 'var(--text-primary)',
-                      borderBottom: idx === autocompleteSuggestions.length - 1 ? 'none' : '1px solid var(--border-color)',
-                    }}
-                    onMouseDown={() => setSearchQuery(s)}
-                  >
-                    🔍 Suggest category: <strong style={{ color: 'var(--accent-color)' }}>{s}</strong>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* B. Location Search */}
-          <div style={{ position: 'relative', flex: '1 1 200px' }}>
-            <MapPin size={20} style={{ position: 'absolute', left: '16px', top: '14px', color: 'var(--accent-color)' }} />
-            <input 
-              type="text"
-              className="form-control"
-              style={{ paddingLeft: '44px', height: '48px', borderRadius: 'var(--radius-full)', border: '2px solid var(--accent-color-light)' }}
-              placeholder="Location (e.g. HSR, Mumbai)"
-              value={locationSearchQuery}
-              onChange={(e) => {
-                setLocationSearchQuery(e.target.value);
-                setShowLocationSuggestions(true);
-              }}
-              onFocus={() => setShowLocationSuggestions(true)}
-              onBlur={() => setTimeout(() => setShowLocationSuggestions(false), 200)}
-            />
-            {/* Realtime Location Autocomplete dropdown */}
-            {showLocationSuggestions && (locationSuggestions.length > 0 || isLoadingLocations) && (
-              <div 
-                style={{ 
-                  position: 'absolute', 
-                  top: '54px', 
-                  left: '12px', 
-                  right: '12px', 
-                  backgroundColor: 'white', 
-                  border: '1px solid var(--border-color)',
-                  borderRadius: '12px',
-                  boxShadow: 'var(--shadow-lg)',
-                  zIndex: 1000,
-                  overflow: 'hidden'
-                }}
-              >
-                {isLoadingLocations && (
-                  <div style={{ padding: '12px 20px', fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <RefreshCw size={14} className="animate-spin" style={{ animation: 'spin 1.5s linear infinite' }} />
-                    <span>Searching India locations...</span>
-                  </div>
-                )}
-                {locationSuggestions.map((loc, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => handleLocationSelect(loc)}
-                    style={{
-                      width: '100%',
-                      padding: '12px 20px',
-                      textAlign: 'left',
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontSize: '14px',
-                      color: 'var(--text-primary)',
-                      borderBottom: idx === locationSuggestions.length - 1 ? 'none' : '1px solid var(--border-color)',
-                    }}
-                    onMouseDown={() => handleLocationSelect(loc)}
-                  >
-                    📍 <strong>{loc.name.split(',')[0]}</strong> <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{loc.name.split(',').slice(1).join(',')}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Mobile Filter Drawer trigger */}
-          <button
-            onClick={() => setIsFilterOpenMobile(true)}
-            className="btn btn-outline"
-            style={{ 
-              borderRadius: 'var(--radius-full)', 
-              height: '48px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px'
-            }}
-            ref={(el) => {
-              if (el) {
-                el.style.setProperty('display', window.innerWidth < 1024 ? 'flex' : 'none');
-              }
-            }}
-          >
-            <SlidersHorizontal size={18} />
-            <span>Filters</span>
-            {getActiveFilterCount() > 0 && (
-              <span style={{ backgroundColor: 'var(--accent-color)', color: 'white', fontSize: '11px', borderRadius: '50%', width: '18px', height: '18px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {getActiveFilterCount()}
-              </span>
-            )}
-          </button>
-        </div>
-
-        {/* Categories Horizontal Chips Row */}
-        <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px', width: '100%' }} className="no-print">
-          {categoriesList.map(cat => {
-            const isSelected = selectedCategories.includes(cat);
-            return (
+            {searchQuery && (
               <button
-                key={cat}
                 type="button"
-                onClick={() => handleToggleCategory(cat)}
+                onClick={() => setSearchQuery('')}
+                className="btn-icon"
                 style={{
-                  padding: '6px 16px',
-                  borderRadius: 'var(--radius-full)',
-                  fontSize: '13px',
-                  fontWeight: '600',
-                  border: '2px solid',
-                  borderColor: isSelected ? 'var(--accent-color)' : 'var(--border-color)',
-                  backgroundColor: isSelected ? 'var(--accent-color-light)' : 'var(--bg-secondary)',
-                  color: isSelected ? 'var(--accent-color)' : 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  whiteSpace: 'nowrap',
-                  minHeight: '34px',
-                  minWidth: 'auto'
+                  position: 'absolute',
+                  right: '8px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  minWidth: '32px',
+                  minHeight: '32px',
+                  padding: '4px'
+                }}
+                aria-label="Clear search query"
+              >
+                <X size={16} />
+              </button>
+            )}
+          </div>
+
+          {/* Location Search Input */}
+          <div style={{ position: 'relative' }}>
+            <MapPin
+              size={18}
+              style={{
+                position: 'absolute',
+                left: '14px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                color: 'var(--accent-color)',
+                pointerEvents: 'none'
+              }}
+            />
+            <input
+              type="text"
+              role="combobox"
+              aria-expanded={showLocSuggestions && locationSuggestions.length > 0}
+              aria-autocomplete="list"
+              aria-controls="browse-location-suggestions"
+              aria-activedescendant={activeLocIndex >= 0 ? `browse-loc-opt-${activeLocIndex}` : undefined}
+              className="form-control"
+              style={{ paddingLeft: '44px', paddingRight: userLat !== null ? '64px' : '40px', height: '46px' }}
+              placeholder={`Search location (current: ${locationLabel})`}
+              value={locationQuery}
+              onChange={(e) => {
+                setLocationQuery(e.target.value);
+                if (e.target.value.trim().length < 2) {
+                  setLocationSuggestions([]);
+                }
+                setShowLocSuggestions(true);
+                setActiveLocIndex(-1);
+              }}
+              onKeyDown={handleLocationKeyDown}
+              onFocus={() => setShowLocSuggestions(true)}
+            />
+            <div style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              {userLat !== null && (
+                <button
+                  type="button"
+                  onClick={handleClearLocation}
+                  className="btn-icon"
+                  style={{ minWidth: '32px', minHeight: '32px', padding: '4px' }}
+                  aria-label="Clear location filter"
+                  title="Clear location filter"
+                >
+                  <X size={16} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleUseCurrentLocation}
+                disabled={isLocating}
+                className="btn-icon"
+                style={{ minWidth: '32px', minHeight: '32px', padding: '4px', color: 'var(--accent-color)' }}
+                aria-label="Use current GPS location"
+                title="Use current GPS location"
+              >
+                <Navigation size={18} />
+              </button>
+            </div>
+
+            {/* Suggestions dropdown */}
+            {showLocSuggestions && locationSuggestions.length > 0 && (
+              <ul
+                id="browse-location-suggestions"
+                role="listbox"
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  backgroundColor: 'var(--bg-secondary)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: 'var(--shadow-lg)',
+                  maxHeight: '200px',
+                  overflowY: 'auto',
+                  zIndex: 100,
+                  listStyle: 'none',
+                  padding: '6px 0',
+                  margin: '4px 0 0 0'
                 }}
               >
-                {cat}
-              </button>
-            );
-          })}
+                {locationSuggestions.map((s, idx) => (
+                  <li
+                    key={idx}
+                    id={`browse-loc-opt-${idx}`}
+                    role="option"
+                    aria-selected={idx === activeLocIndex}
+                    onMouseDown={() => handleSelectLocation(s)}
+                    style={{
+                      padding: '10px 14px',
+                      fontSize: 'var(--text-sm)',
+                      cursor: 'pointer',
+                      backgroundColor: idx === activeLocIndex ? 'var(--bg-hover, rgba(0,0,0,0.06))' : 'transparent',
+                      borderBottom: idx < locationSuggestions.length - 1 ? '1px solid var(--border-color)' : 'none',
+                      color: 'var(--text-primary)'
+                    }}
+                  >
+                    <strong>{s.city || 'Neighborhood'}</strong>
+                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>{s.label}</div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* 2. Main split area: Sidebar filters + Map/Grid Content */}
-      <div 
-        style={{ 
-          display: 'grid', 
-          gridTemplateColumns: '1fr', 
-          gap: '32px',
-          alignItems: 'start'
-        }}
-        ref={(el) => {
-          if (el) {
-            el.style.setProperty('grid-template-columns', window.innerWidth >= 1024 ? '280px 1fr' : '1fr');
-          }
-        }}
-      >
-        
-        {/* DESKTOP FILTER PANEL SIDEBAR */}
+      {/* Main Content: Filters + Map & Grid */}
+      <div className="browse-layout-grid">
+        {/* Desktop Sidebar Filters */}
         <aside
-          className="card no-print"
+          className="card"
           style={{
+            padding: '20px',
+            height: 'fit-content',
             position: 'sticky',
-            top: '40px',
-            padding: '24px',
-            display: 'none',
+            top: '24px',
+            display: 'flex',
             flexDirection: 'column',
-            gap: '20px',
-            backgroundColor: 'var(--bg-secondary)'
-          }}
-          ref={(el) => {
-            if (el) {
-              el.style.setProperty('display', window.innerWidth >= 1024 ? 'flex' : 'none');
-            }
+            gap: '16px'
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
-            <h3 style={{ fontSize: '17px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Filter size={18} style={{ color: 'var(--accent-color)' }} /> Filters
-            </h3>
-            {getActiveFilterCount() > 0 && (
-              <button 
-                onClick={handleClearFilters}
-                style={{ background: 'none', border: 'none', color: 'var(--status-danger)', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}
-              >
-                Clear All
-              </button>
-            )}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '12px', borderBottom: '1px solid var(--border-color)' }}>
+            <h2 style={{ fontSize: 'var(--text-base)', fontWeight: '700', margin: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <SlidersHorizontal size={18} /> Filters
+            </h2>
+            <button
+              type="button"
+              onClick={clearAllFilters}
+              className="btn-ghost"
+              style={{
+                color: 'var(--accent-color)',
+                fontSize: 'var(--text-xs)',
+                fontWeight: '600'
+              }}
+            >
+              Reset
+            </button>
           </div>
 
-          {/* Distance Geofence slider */}
-          <div>
-            <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Search Radius</span>
-              <strong style={{ color: 'var(--accent-color)' }}>{distanceRadius === 100 ? 'Anywhere 🌍' : `${distanceRadius} km`}</strong>
+          {/* Category */}
+          <div className="filter-section">
+            <label className="form-label" style={{ fontSize: 'var(--text-sm)', marginBottom: '8px' }}>
+              Category
             </label>
-            <input 
-              type="range" 
-              min="1" 
-              max="100" 
-              step="1"
-              style={{ width: '100%', accentColor: 'var(--accent-color)' }} 
-              value={distanceRadius}
-              onChange={(e) => setDistanceRadius(parseFloat(e.target.value))}
-            />
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-              <span>1 km</span>
-              <span>Anywhere</span>
-            </div>
-          </div>
-
-          {/* Price range display slider */}
-          <div>
-            <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Max Daily Price</span>
-              <strong style={{ color: 'var(--accent-color)' }}>₹{priceMax}</strong>
-            </label>
-            <input 
-              type="range" 
-              min="100" 
-              max="2000" 
-              step="50"
-              style={{ width: '100%', accentColor: 'var(--accent-color)' }} 
-              value={priceMax}
-              onChange={(e) => setPriceMax(parseInt(e.target.value))}
-            />
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-              <span>₹100</span>
-              <span>₹2000+</span>
-            </div>
+            <select
+              className="form-control"
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value)}
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
           </div>
 
           {/* Availability Toggle */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span className="form-label" style={{ marginBottom: 0 }}>Show Only Available</span>
-            <label className="switch">
-              <input 
-                type="checkbox" 
+          <div className="filter-section" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+            <div>
+              <label
+                htmlFor="filter-show-available"
+                style={{
+                  fontSize: 'var(--text-sm)',
+                  fontWeight: '600',
+                  color: 'var(--text-primary)',
+                  cursor: 'pointer',
+                  display: 'block'
+                }}
+              >
+                Available Only
+              </label>
+              <p
+                id="filter-show-available-desc"
+                style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', margin: '2px 0 0 0', lineHeight: '1.4' }}
+              >
+                Hide items currently rented out
+              </p>
+            </div>
+            <label className="switch" style={{ flexShrink: 0 }}>
+              <input
+                id="filter-show-available"
+                type="checkbox"
+                role="switch"
+                aria-checked={showOnlyAvailable}
+                aria-describedby="filter-show-available-desc"
                 checked={showOnlyAvailable}
                 onChange={(e) => setShowOnlyAvailable(e.target.checked)}
               />
-              <span className="slider"></span>
+              <span className="slider round" />
             </label>
           </div>
 
-          {/* Condition multi check box */}
-          <div>
-            <label className="form-label">Item Condition</label>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {['New', 'Good', 'Fair'].map(cond => (
-                <label key={cond} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', cursor: 'pointer' }}>
-                  <input 
-                    type="checkbox" 
-                    checked={selectedConditions.includes(cond)}
-                    onChange={() => handleToggleCondition(cond)}
-                    style={{ accentColor: 'var(--accent-color)', width: '18px', height: '18px' }}
-                  />
-                  <span>{cond}</span>
-                </label>
-              ))}
+          {/* Search Radius - Consolidated single slider with preset step markers & Anywhere toggle */}
+          <div className="filter-section">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <label htmlFor="filter-distance-radius" style={{ fontSize: 'var(--text-sm)', fontWeight: '600', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                Search Radius
+              </label>
+              <button
+                type="button"
+                onClick={() => setDistanceRadius((prev) => (prev === 'anywhere' ? 25 : 'anywhere'))}
+                className="btn-pill"
+                aria-pressed={distanceRadius === 'anywhere'}
+                style={{
+                  minHeight: '26px',
+                  padding: '2px 8px',
+                  fontSize: 'var(--text-xs)',
+                  fontWeight: '600',
+                  backgroundColor: distanceRadius === 'anywhere' ? 'rgba(59, 130, 246, 0.12)' : 'var(--bg-secondary)',
+                  color: distanceRadius === 'anywhere' ? '#2563EB' : 'var(--text-secondary)',
+                  borderColor: distanceRadius === 'anywhere' ? '#2563EB' : 'var(--border-color)'
+                }}
+              >
+                Anywhere 🌍
+              </button>
             </div>
-          </div>
 
-          {/* Lender Minimum Rating selection */}
-          <div>
-            <label className="form-label">Minimum Lender Rating</label>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              {[0, 3, 4, 5].map(rating => (
-                <button
-                  key={rating}
-                  type="button"
-                  onClick={() => setMinRating(rating)}
-                  style={{
-                    flex: 1,
-                    padding: '6px',
-                    borderRadius: '8px',
-                    border: '2px solid',
-                    borderColor: minRating === rating ? 'var(--accent-color)' : 'var(--border-color)',
-                    backgroundColor: minRating === rating ? 'var(--accent-color-light)' : 'transparent',
-                    color: minRating === rating ? 'var(--accent-color)' : 'var(--text-secondary)',
-                    cursor: 'pointer',
-                    fontWeight: 'bold',
-                    fontSize: '12px',
-                    minWidth: 'auto'
-                  }}
-                >
-                  {rating === 0 ? 'Any' : `${rating}★`}
-                </button>
-              ))}
-            </div>
-          </div>
-
-        </aside>
-
-        {/* MAP & CARDS CONTAINER AREA */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          
-          {/* Map layout (Radius bounded) */}
-          <div style={{ height: '360px', width: '100%', borderRadius: '16px', overflow: 'hidden', boxShadow: 'var(--shadow-sm)', border: '1px solid var(--border-color)' }}>
-            <LeafletMap 
-              items={filteredItems}
-              userLat={userLat}
-              userLng={userLng}
-              radiusKm={distanceRadius}
-              onLocationChange={(lat, lng) => {
-                setUserLat(lat);
-                setUserLng(lng);
+            {/* Single Consolidated Slider with marked step presets */}
+            <input
+              id="filter-distance-radius"
+              type="range"
+              min="5"
+              max="50"
+              step="5"
+              list="radius-preset-markers"
+              value={distanceRadius === 'anywhere' ? 50 : distanceRadius}
+              onChange={(e) => setDistanceRadius(Number(e.target.value))}
+              disabled={distanceRadius === 'anywhere'}
+              style={{
+                width: '100%',
+                accentColor: distanceRadius === 'anywhere' ? 'var(--text-muted)' : 'var(--accent-color)',
+                opacity: distanceRadius === 'anywhere' ? 0.6 : 1
               }}
-              onViewItem={onViewItem}
+              aria-label={`Search radius: ${distanceRadius === 'anywhere' ? 'Anywhere' : `${distanceRadius} km`}`}
             />
+            <datalist id="radius-preset-markers">
+              <option value="5" label="5 km" />
+              <option value="10" label="10 km" />
+              <option value="25" label="25 km" />
+              <option value="50" label="50 km" />
+            </datalist>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: '2px' }}>
+              <span>5 km</span>
+              <span style={{ fontWeight: '600', color: distanceRadius === 'anywhere' ? '#2563EB' : 'var(--accent-color)' }}>
+                {distanceRadius === 'anywhere' ? 'Anywhere' : `${distanceRadius} km`}
+              </span>
+              <span>50 km</span>
+            </div>
+
+            {distanceRadius === 'anywhere' ? (
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', margin: '6px 0 0 0', lineHeight: '1.3' }}>
+                🌍 Searching all listings without any distance limitation.
+              </p>
+            ) : !(typeof userLat === 'number' && typeof userLng === 'number') ? (
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--status-warning)', margin: '4px 0 0 0' }}>
+                📍 Set a location above to filter listings within {distanceRadius} km, or choose <strong>Anywhere</strong>.
+              </p>
+            ) : null}
           </div>
 
-          {/* Card list layout toggle toolbar */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <strong style={{ fontSize: '18px' }}>{filteredItems.length} items found</strong>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'block' }}>
-                {distanceRadius === 100 ? 'Showing items from all distances.' : `Showing items within ${distanceRadius} km radius from your location pin.`}
+          {/* Price Range */}
+          <div className="filter-section">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <label htmlFor="filter-price-max" style={{ fontSize: 'var(--text-sm)', fontWeight: '600', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                Max Daily Rent
+              </label>
+              <span style={{ backgroundColor: 'var(--accent-color-light)', color: 'var(--accent-color)', fontWeight: '700', fontSize: 'var(--text-xs)', padding: '2px 8px', borderRadius: 'var(--radius-full)' }}>
+                ₹{priceMax}/day
               </span>
             </div>
+            <input
+              id="filter-price-max"
+              type="range"
+              min="100"
+              max="10000"
+              step="100"
+              value={priceMax}
+              onChange={(e) => setPriceMax(Number(e.target.value))}
+              style={{ width: '100%', accentColor: 'var(--accent-color)' }}
+              aria-label={`Max daily rent: ₹${priceMax} per day`}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: '2px' }}>
+              <span>₹100</span>
+              <span>₹10,000</span>
+            </div>
+          </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }} className="no-print">
-              
-              {/* Sort By Dropdown */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: '600' }}>SORT BY</span>
-                <select 
-                  className="form-control"
-                  style={{ height: '38px', minWidth: '130px', padding: '0 12px', fontSize: '13px' }}
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value)}
-                >
-                  <option value="nearest">Nearest First</option>
-                  <option value="price-low">Price: Low to High</option>
-                  <option value="price-high">Price: High to Low</option>
-                  <option value="rating">Highest Rated</option>
-                  <option value="newest">Newest Listed</option>
-                </select>
-              </div>
+          {/* Minimum Lender Rating */}
+          <div className="filter-section">
+            <label className="form-label" style={{ fontSize: 'var(--text-sm)', marginBottom: '8px' }}>
+              Min Lender Rating
+            </label>
+            <select
+              className="form-control"
+              value={minRating}
+              onChange={(e) => setMinRating(Number(e.target.value))}
+            >
+              <option value="0">Any Rating (includes unrated)</option>
+              <option value="4">4.0+ Stars ★★★★</option>
+              <option value="4.5">4.5+ Stars ★★★★★</option>
+            </select>
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', margin: '4px 0 0 0', lineHeight: '1.4' }}>
+              Filters by lender rating. Unrated lenders are included under &ldquo;Any Rating&rdquo;.
+            </p>
+          </div>
 
-              {/* Grid / List Switcher */}
-              <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
+          {/* Sorting */}
+          <div className="filter-section">
+            <label className="form-label" style={{ fontSize: 'var(--text-sm)', marginBottom: '8px' }}>
+              Sort By
+            </label>
+            <select
+              className="form-control"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+            >
+              <option value="newest">Recently Listed</option>
+              <option value="price-low">Price: Low to High</option>
+              <option value="price-high">Price: High to Low</option>
+            </select>
+          </div>
+        </aside>
+
+        {/* Right Section: Map & Listings */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          {/* Interactive Map (Compact & Collapsible) */}
+          {!isMapCollapsed && (
+            <div
+              className="card"
+              style={{
+                height: '160px',
+                padding: 0,
+                overflow: 'hidden',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-color)',
+                transition: 'all var(--transition-fast)'
+              }}
+            >
+              <LeafletMap
+                items={items}
+                userLat={userLat}
+                userLng={userLng}
+                radiusKm={distanceRadius === 'anywhere' ? null : distanceRadius}
+                onLocationChange={(lat, lng) => {
+                  setUserLat(lat);
+                  setUserLng(lng);
+                  setLocationLabel('Pinned Map Location');
+                }}
+                onViewItem={handleItemClick}
+              />
+            </div>
+          )}
+
+          {/* Anchored Results & Map Controls Toolbar */}
+          <div className="browse-toolbar">
+            <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
+              Showing <strong style={{ color: 'var(--text-primary)' }}>{items.length}</strong> {items.length === 1 ? 'item' : 'items'}
+            </span>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={() => setIsMapCollapsed((prev) => !prev)}
+                className="btn-ghost"
+                style={{ fontSize: 'var(--text-xs)', padding: '6px 12px' }}
+                aria-expanded={!isMapCollapsed}
+                aria-label={isMapCollapsed ? 'Show map' : 'Hide map'}
+              >
+                <MapPin size={14} />
+                <span>{isMapCollapsed ? 'Show Map' : 'Hide Map'}</span>
+              </button>
+              <div
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '2px',
+                  backgroundColor: 'var(--bg-tertiary)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-full)',
+                  padding: '2px'
+                }}
+                role="group"
+                aria-label="View layout switch"
+              >
                 <button
                   type="button"
                   onClick={() => setViewType('grid')}
+                  className={viewType === 'grid' ? 'btn btn-primary' : 'btn-ghost'}
                   style={{
-                    backgroundColor: viewType === 'grid' ? 'var(--accent-color-light)' : 'white',
-                    color: viewType === 'grid' ? 'var(--accent-color)' : 'var(--text-secondary)',
-                    border: 'none',
-                    padding: '8px 12px',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    minWidth: 'auto'
+                    minHeight: '30px',
+                    minWidth: '30px',
+                    padding: '4px',
+                    borderRadius: 'var(--radius-full)'
                   }}
-                  title="Grid View"
+                  aria-label="Grid view"
+                  aria-pressed={viewType === 'grid'}
                 >
-                  <Grid size={16} />
+                  <Grid size={15} />
                 </button>
                 <button
                   type="button"
                   onClick={() => setViewType('list')}
+                  className={viewType === 'list' ? 'btn btn-primary' : 'btn-ghost'}
                   style={{
-                    backgroundColor: viewType === 'list' ? 'var(--accent-color-light)' : 'white',
-                    color: viewType === 'list' ? 'var(--accent-color)' : 'var(--text-secondary)',
-                    border: 'none',
-                    padding: '8px 12px',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    minWidth: 'auto'
+                    minHeight: '30px',
+                    minWidth: '30px',
+                    padding: '4px',
+                    borderRadius: 'var(--radius-full)'
                   }}
-                  title="List View"
+                  aria-label="List view"
+                  aria-pressed={viewType === 'list'}
                 >
-                  <List size={16} />
+                  <List size={15} />
                 </button>
               </div>
-
             </div>
           </div>
 
-          {/* Filter results display */}
-          {filteredItems.length === 0 ? (
-            <div 
-              style={{ 
-                textAlign: 'center', 
-                padding: '64px 24px', 
-                backgroundColor: 'white', 
-                border: '1px solid var(--border-color)',
-                borderRadius: '16px',
-                boxShadow: 'var(--shadow-sm)'
-              }}
-            >
-              <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔍</div>
-              <h3 style={{ fontSize: '18px', color: 'var(--text-primary)' }}>No nearby items found</h3>
-              <div style={{ color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '480px', margin: '8px auto 24px', fontSize: '14px', lineHeight: '1.6' }}>
-                <p style={{ marginBottom: '12px' }}>
-                  Try widening your search radius, selecting other categories, or clearing all filters to start fresh.
-                </p>
-                {locationSearchQuery.toLowerCase() !== 'bangalore' && !locationSearchQuery.toLowerCase().includes('hsr') && !locationSearchQuery.toLowerCase().includes('koramangala') && !locationSearchQuery.toLowerCase().includes('whitefield') && !locationSearchQuery.toLowerCase().includes('jayanagar') && (
-                  <div style={{ padding: '14px', borderRadius: '12px', backgroundColor: 'var(--accent-color-light)', border: '1px dashed var(--accent-color)', fontSize: '13px', color: 'var(--accent-color)', textAlign: 'left', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-                    <span style={{ fontSize: '16px' }}>💡</span>
-                    <div>
-                      <strong>Tip:</strong> All pre-configured sample items are listed around <strong>Bangalore</strong>. Search for <strong>"Bangalore"</strong> or <strong>"HSR Layout"</strong> in the location bar above to view the sample items instantly!
-                    </div>
-                  </div>
-                )}
-              </div>
-              <button onClick={handleClearFilters} className="btn btn-primary">
-                Clear Filters & Search
+          {/* Items Grid / Empty State */}
+          {isLoading ? (
+            <div style={{ padding: '64px 20px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+              <div style={{ display: 'inline-block', width: '32px', height: '32px', border: '3px solid var(--border-color)', borderTopColor: 'var(--accent-color)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+              <p style={{ marginTop: '16px', color: 'var(--text-secondary)', fontSize: 'var(--text-sm)' }}>Loading neighborhood items...</p>
+            </div>
+          ) : error ? (
+            <div style={{ padding: '48px', textAlign: 'center' }}>
+              <p style={{ color: 'var(--status-danger)' }}>{error}</p>
+              <button type="button" onClick={fetchItems} className="btn btn-primary">
+                Try Again
+              </button>
+            </div>
+          ) : items.length === 0 ? (
+            <div className="card" style={{ width: '100%', boxSizing: 'border-box', padding: '48px', textAlign: 'center' }}>
+              <h2 style={{ fontSize: 'var(--text-lg)', fontWeight: '700', marginBottom: '8px' }}>
+                No items match your search
+              </h2>
+              <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', maxWidth: '400px', margin: '0 auto 20px auto' }}>
+                Try widening your search radius, selecting a different category, or resetting active filters.
+              </p>
+              <button type="button" onClick={clearAllFilters} className="btn btn-primary">
+                Reset Filters
               </button>
             </div>
           ) : (
-            <div 
-              className={viewType === 'grid' ? 'grid-cols-responsive' : ''}
-              style={viewType === 'list' ? { display: 'flex', flexDirection: 'column', gap: '16px' } : {}}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns:
+                  viewType === 'grid' ? 'repeat(auto-fill, minmax(260px, 1fr))' : '1fr',
+                gap: '20px'
+              }}
             >
-              {filteredItems.map(item => (
-                <div key={item.id} style={viewType === 'list' ? { width: '100%' } : {}}>
-                  <ItemCard 
-                    item={item} 
-                    onView={onViewItem} 
-                    onViewUser={onViewUser}
-                  />
-                </div>
+              {items.map((item) => (
+                <ItemCard
+                  key={item.id}
+                  item={item}
+                  onView={handleItemClick}
+                  onViewUser={handleUserClick}
+                  isOwner={user && user.id === item.lenderId}
+                />
               ))}
             </div>
           )}
-
         </div>
-
       </div>
-
-      {/* MOBILE DRAWER MODAL OVERLAY */}
-      {isFilterOpenMobile && (
-        <div className="modal-overlay no-print" style={{ zIndex: 1200 }}>
-          <div className="modal-content" style={{ maxHeight: '80vh', borderTopLeftRadius: '24px', borderTopRightRadius: '24px', alignSelf: 'flex-end', margin: 0 }}>
-            
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '20px 24px', borderBottom: '1px solid var(--border-color)' }}>
-              <h3 style={{ fontSize: '18px' }}>Filters</h3>
-              <button 
-                onClick={() => setIsFilterOpenMobile(false)}
-                style={{ background: 'none', border: 'none', cursor: 'pointer' }}
-              >
-                <X size={20} />
-              </button>
-            </div>
-
-            <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px', overflowY: 'auto' }}>
-              
-              {/* Radius slider */}
-              <div>
-                <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span>Search Radius</span>
-                  <strong style={{ color: 'var(--accent-color)' }}>{distanceRadius === 100 ? 'Anywhere 🌍' : `${distanceRadius} km`}</strong>
-                </label>
-                <input 
-                  type="range" 
-                  min="1" 
-                  max="100" 
-                  step="1"
-                  style={{ width: '100%', accentColor: 'var(--accent-color)' }} 
-                  value={distanceRadius}
-                  onChange={(e) => setDistanceRadius(parseFloat(e.target.value))}
-                />
-              </div>
-
-              {/* Price range dual slider */}
-              <div>
-                <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span>Max Daily Price</span>
-                  <strong style={{ color: 'var(--accent-color)' }}>₹{priceMax}</strong>
-                </label>
-                <input 
-                  type="range" 
-                  min="100" 
-                  max="2000" 
-                  step="50"
-                  style={{ width: '100%', accentColor: 'var(--accent-color)' }} 
-                  value={priceMax}
-                  onChange={(e) => setPriceMax(parseInt(e.target.value))}
-                />
-              </div>
-
-              {/* Availability toggle */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span className="form-label" style={{ marginBottom: 0 }}>Show Only Available</span>
-                <label className="switch">
-                  <input 
-                    type="checkbox" 
-                    checked={showOnlyAvailable}
-                    onChange={(e) => setShowOnlyAvailable(e.target.checked)}
-                  />
-                  <span className="slider"></span>
-                </label>
-              </div>
-
-              {/* Condition */}
-              <div>
-                <label className="form-label">Item Condition</label>
-                <div style={{ display: 'flex', gap: '16px' }}>
-                  {['New', 'Good', 'Fair'].map(cond => (
-                    <label key={cond} style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
-                      <input 
-                        type="checkbox" 
-                        checked={selectedConditions.includes(cond)}
-                        onChange={() => handleToggleCondition(cond)}
-                        style={{ accentColor: 'var(--accent-color)', width: '18px', height: '18px' }}
-                      />
-                      <span>{cond}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              {/* Minimum rating */}
-              <div>
-                <label className="form-label">Minimum Lender Rating</label>
-                <div style={{ display: 'flex', gap: '6px' }}>
-                  {[0, 3, 4, 5].map(rating => (
-                    <button
-                      key={rating}
-                      type="button"
-                      onClick={() => setMinRating(rating)}
-                      style={{
-                        flex: 1,
-                        padding: '8px',
-                        borderRadius: '8px',
-                        border: '2px solid',
-                        borderColor: minRating === rating ? 'var(--accent-color)' : 'var(--border-color)',
-                        backgroundColor: minRating === rating ? 'var(--accent-color-light)' : 'transparent',
-                        color: minRating === rating ? 'var(--accent-color)' : 'var(--text-secondary)',
-                        cursor: 'pointer',
-                        fontWeight: 'bold',
-                        fontSize: '12px'
-                      }}
-                    >
-                      {rating === 0 ? 'Any' : `${rating}★`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: '12px', marginTop: '12px' }}>
-                <button 
-                  type="button" 
-                  onClick={handleClearFilters}
-                  className="btn btn-outline"
-                  style={{ flex: 1 }}
-                >
-                  Clear All
-                </button>
-                <button 
-                  type="button" 
-                  onClick={() => setIsFilterOpenMobile(false)}
-                  className="btn btn-primary"
-                  style={{ flex: 2 }}
-                >
-                  Apply Filters
-                </button>
-              </div>
-
-            </div>
-
-          </div>
-        </div>
-      )}
-
-      {/* Resize Listener to automatically close mobile filter overlay if desktop screen size is matched */}
-      <MobileFilterDrawerCleanup isOpen={isFilterOpenMobile} setIsOpen={setIsFilterOpenMobile} />
-
     </div>
+  </div>
   );
-}
-
-function MobileFilterDrawerCleanup({ isOpen, setIsOpen }) {
-  useEffect(() => {
-    const cleanup = () => {
-      if (window.innerWidth >= 1024 && isOpen) {
-        setIsOpen(false);
-      }
-    };
-    window.addEventListener('resize', cleanup);
-    return () => window.removeEventListener('resize', cleanup);
-  }, [isOpen, setIsOpen]);
-  return null;
 }

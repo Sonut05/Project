@@ -1,12 +1,22 @@
-import React, { useState, useEffect } from 'react';
-import { getDb, dbOps } from '../utils/mockDb';
+import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import ReceiptModal from '../components/ReceiptModal';
-import { Search, Calendar, FileText, ArrowRight, Printer, Star, Heart } from 'lucide-react';
+import { Search, FileText, ArrowRight, Printer, Star, X } from 'lucide-react';
+import { useAuth } from '../context/useAuth.js';
+import { requestsApi } from '../api/requests';
+import { reviewsApi } from '../api/reviews';
+import { formatDisplayDate } from '../utils/dateUtils';
+import { resolveImageUrl, ITEM_PLACEHOLDER } from '../utils/imageUrl.js';
 
 export default function History({ onViewUser, onViewItem, toast }) {
-  const [db, setDb] = useState(getDb());
-  const activeUserId = db.currentUserId || 'user-self';
-  const [activeTab, setActiveTab] = useState('borrowed'); // borrowed or lent
+  const navigate = useNavigate();
+  const { user } = useAuth();
+
+  const [activeTab, setActiveTab] = useState('borrowed'); // 'borrowed' | 'lent'
+  const [borrowedRequests, setBorrowedRequests] = useState([]);
+  const [lentRequests, setLentRequests] = useState([]);
+  const [loading, setLoading] = useState(Boolean(user));
+  const [error, setError] = useState(null);
 
   // Filter states
   const [searchQuery, setSearchQuery] = useState('');
@@ -20,151 +30,169 @@ export default function History({ onViewUser, onViewItem, toast }) {
   const [reviewTarget, setReviewTarget] = useState(null); // { type: 'item'|'user', targetId, name, requestId }
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
+  const [submittingReview, setSubmittingReview] = useState(false);
+  const [reviewError, setReviewError] = useState(null);
 
-  const refreshData = () => {
-    setDb(getDb());
-  };
+  const refreshHistory = useCallback(async () => {
+    if (!user) return;
+    try {
+      const [incoming, outgoing] = await Promise.all([
+        requestsApi.getIncoming(),
+        requestsApi.getOutgoing()
+      ]);
+      const historyStatuses = ['Completed', 'Cancelled', 'Disputed'];
+      setLentRequests(incoming.filter((r) => historyStatuses.includes(r.status)));
+      setBorrowedRequests(outgoing.filter((r) => historyStatuses.includes(r.status)));
+    } catch (err) {
+      setError(err.message || 'Failed to load rental history');
+    }
+  }, [user]);
 
   useEffect(() => {
-    refreshData();
-    window.addEventListener('rentit_db_update', refreshData);
-    return () => window.removeEventListener('rentit_db_update', refreshData);
-  }, []);
-
-  // Filter lists based on Tab, Search input, and Dates
-  const getHistoryList = () => {
-    const list = db.requests.filter((req) => {
-      // Completed, Cancelled, or Disputed
-      const isHistoryStatus = ['Completed', 'Cancelled', 'Disputed'].includes(req.status);
-      if (!isHistoryStatus) return false;
-
-      if (activeTab === 'borrowed') {
-        return req.borrowerId === activeUserId;
-      } else {
-        return req.lenderId === activeUserId;
+    if (!user) return;
+    let isMounted = true;
+    async function loadData() {
+      try {
+        const [incoming, outgoing] = await Promise.all([
+          requestsApi.getIncoming(),
+          requestsApi.getOutgoing()
+        ]);
+        if (isMounted) {
+          const historyStatuses = ['Completed', 'Cancelled', 'Disputed'];
+          setLentRequests(incoming.filter((r) => historyStatuses.includes(r.status)));
+          setBorrowedRequests(outgoing.filter((r) => historyStatuses.includes(r.status)));
+        }
+      } catch (err) {
+        if (isMounted) setError(err.message || 'Failed to load rental history');
+      } finally {
+        if (isMounted) setLoading(false);
       }
-    });
+    }
+    loadData();
+    return () => {
+      isMounted = false;
+    };
+  }, [user]);
 
-    return list.filter((req) => {
-      const item = db.items.find(i => i.id === req.itemId) || { name: '' };
-      const lender = db.users[req.lenderId] || { name: '' };
-      const borrower = db.users[req.borrowerId] || { name: '' };
-      const otherUser = activeTab === 'borrowed' ? lender : borrower;
+  const rawList = activeTab === 'borrowed' ? borrowedRequests : lentRequests;
 
-      // 1. Search Query filter (matches item name or person name)
+  const historyList = rawList
+    .filter((req) => {
+      const item = req.item || { name: '' };
+      const otherUser = activeTab === 'borrowed' ? req.lender : req.borrower;
+      const otherUserName = otherUser?.name || '';
+
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase();
         const matchItem = item.name.toLowerCase().includes(query);
-        const matchPerson = otherUser.name.toLowerCase().includes(query);
+        const matchPerson = otherUserName.toLowerCase().includes(query);
         if (!matchItem && !matchPerson) return false;
       }
 
-      // 2. Date Range filter (check overlap or bounds)
       if (startDateFilter) {
-        if (new Date(req.startDate) < new Date(startDateFilter)) return false;
+        if (req.startDate < startDateFilter) return false;
       }
       if (endDateFilter) {
-        if (new Date(req.endDate) > new Date(endDateFilter)) return false;
+        if (req.endDate > endDateFilter) return false;
       }
 
       return true;
-    }).sort((a, b) => new Date(b.endDate) - new Date(a.endDate)); // Sort by most recent first
-  };
-
-  const historyList = getHistoryList();
+    })
+    .sort((a, b) => b.endDate.localeCompare(a.endDate));
 
   // Summary Metrics calculations for Lender Tab
-  const getLenderStats = () => {
-    const lentList = db.requests.filter(req => req.lenderId === activeUserId && req.status === 'Completed');
-    const totalEarnings = lentList.reduce((sum, req) => {
-      const item = db.items.find(i => i.id === req.itemId) || { dailyPrice: 0 };
-      return sum + (req.totalDays * item.dailyPrice);
-    }, 0);
+  const completedLent = lentRequests.filter((r) => r.status === 'Completed');
+  const totalEarnings = completedLent.reduce((sum, r) => sum + (r.rentalAmount || 0), 0);
 
-    // Calculate most rented item
-    const itemRentals = {};
-    lentList.forEach(req => {
-      itemRentals[req.itemId] = (itemRentals[req.itemId] || 0) + 1;
-    });
+  const itemCounts = {};
+  completedLent.forEach((req) => {
+    const name = req.item?.name || 'Item';
+    itemCounts[name] = (itemCounts[name] || 0) + 1;
+  });
 
-    let mostRentedId = '';
-    let maxRentals = 0;
-    Object.keys(itemRentals).forEach(id => {
-      if (itemRentals[id] > maxRentals) {
-        maxRentals = itemRentals[id];
-        mostRentedId = id;
-      }
-    });
-
-    const mostRentedItemName = db.items.find(i => i.id === mostRentedId)?.name || 'None listed yet';
-
-    return {
-      totalEarnings,
-      completedCount: lentList.length,
-      mostRentedItem: mostRentedItemName
-    };
-  };
-
-  const lenderStats = getLenderStats();
+  let mostRentedItem = 'None yet';
+  let maxCount = 0;
+  Object.entries(itemCounts).forEach(([name, count]) => {
+    if (count > maxCount) {
+      maxCount = count;
+      mostRentedItem = name;
+    }
+  });
 
   const handleOpenReviewForm = (type, targetId, name, requestId) => {
     setReviewTarget({ type, targetId, name, requestId });
     setReviewRating(5);
     setReviewComment('');
+    setReviewError(null);
   };
 
-  const handleSubmitReview = (e) => {
+  const handleSubmitReview = async (e) => {
     e.preventDefault();
     if (!reviewTarget) return;
 
-    dbOps.addReview({
-      targetType: reviewTarget.type,
-      targetId: reviewTarget.targetId,
-      authorName: db.users[activeUserId]?.name || 'Rahul Sharma',
-      authorAvatar: db.users[activeUserId]?.avatar || '',
-      rating: reviewRating,
-      comment: reviewComment.trim() || 'Great renting experience!'
-    });
+    setSubmittingReview(true);
+    setReviewError(null);
 
-    // Mark as reviewed in request object metadata to prevent duplicate submissions
-    const localDb = getDb();
-    const req = localDb.requests.find(r => r.id === reviewTarget.requestId);
-    if (req) {
-      if (reviewTarget.type === 'item') {
-        req.itemReviewed = true;
-      } else {
-        req.userReviewed = true;
+    try {
+      await reviewsApi.createReview(reviewTarget.requestId, {
+        targetType: reviewTarget.type,
+        targetId: reviewTarget.targetId,
+        rating: reviewRating,
+        comment: reviewComment.trim() || undefined
+      });
+
+      if (toast) {
+        toast(`Review submitted successfully for ${reviewTarget.name}! 🌟`);
       }
-      dbOps.updateProfile({}); // triggers updates
-      localStorage.setItem('rentit_p2p_db_v1', JSON.stringify(localDb));
-      window.dispatchEvent(new Event('rentit_db_update'));
+      setReviewTarget(null);
+      await refreshHistory();
+    } catch (err) {
+      setReviewError(err.message || 'Failed to submit review');
+    } finally {
+      setSubmittingReview(false);
     }
-
-    toast(`Review submitted successfully for ${reviewTarget.name}! 🌟`);
-    setReviewTarget(null);
-    refreshData();
   };
 
-  const handleDownloadHistoryReport = () => {
-    window.print(); // Uses standard print formatting stylesheet defined in index.css to create high quality PDFs!
+  const handlePrint = () => {
+    window.print();
   };
 
   const formatDate = (dateStr) => {
     if (!dateStr) return '';
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-IN', {
-      day: 'numeric',
-      month: 'short',
-    });
+    return formatDisplayDate(dateStr);
   };
+
+  const handleView = (itemId) => {
+    if (onViewItem) {
+      onViewItem(itemId);
+    } else {
+      navigate(`/items/${itemId}`);
+    }
+  };
+
+  const handleViewProfile = (userId) => {
+    if (onViewUser) {
+      onViewUser(userId);
+    } else {
+      navigate(`/profile/${userId}`);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="main-content" style={{ textAlign: 'center', padding: '60px 20px' }}>
+        <div style={{ display: 'inline-block', width: '32px', height: '32px', border: '3px solid var(--border-color)', borderTopColor: 'var(--accent-color)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <p style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>Loading rental history...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="main-content history-page">
-      
       {/* Printable Report Header */}
       <div style={{ display: 'none' }} className="print-header">
         <h2>RentIt Daily Item Rental Report</h2>
-        <p>Rental ledger generated on: {new Date().toLocaleDateString('en-IN')}</p>
+        <p>Rental ledger generated on: {new Date().toLocaleDateString()}</p>
         <p>Log Type: {activeTab === 'borrowed' ? 'Items Borrowed (Borrower)' : 'Items Lent (Lender)'}</p>
       </div>
 
@@ -175,19 +203,24 @@ export default function History({ onViewUser, onViewItem, toast }) {
             Rental History Logs
           </h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '15px', marginTop: '2px' }}>
-            Keep track of invoices, reviews, receipts, and past earnings.
+            Track receipts, completed rentals, reviews, and past earnings.
           </p>
         </div>
         
-        {/* Export to PDF Button */}
         <button 
-          onClick={handleDownloadHistoryReport}
+          onClick={handlePrint}
           className="btn btn-outline"
           style={{ height: '48px', gap: '8px' }}
         >
-          <Printer size={18} /> Export as PDF Report
+          <Printer size={18} /> Print / Save as PDF
         </button>
       </header>
+
+      {error && (
+        <div style={{ padding: '12px 16px', backgroundColor: 'rgba(239, 68, 68, 0.1)', border: '1px solid var(--status-danger)', borderRadius: '8px', color: 'var(--status-danger)', marginBottom: '24px' }}>
+          {error}
+        </div>
+      )}
 
       {/* Segmented Tab switcher */}
       <div 
@@ -256,15 +289,15 @@ export default function History({ onViewUser, onViewItem, toast }) {
         >
           <div>
             <span style={{ fontSize: '11px', color: 'var(--text-secondary)', display: 'block', fontWeight: '700' }}>TOTAL PAST EARNINGS</span>
-            <strong style={{ fontSize: '28px', color: 'var(--accent-color)', fontFamily: 'var(--font-display)' }}>₹{lenderStats.totalEarnings}</strong>
+            <strong style={{ fontSize: '28px', color: 'var(--accent-color)', fontFamily: 'var(--font-display)' }}>₹{totalEarnings}</strong>
           </div>
           <div style={{ borderLeft: '1px solid var(--border-color)', paddingLeft: '20px' }}>
             <span style={{ fontSize: '11px', color: 'var(--text-secondary)', display: 'block', fontWeight: '700' }}>RENTALS COMPLETED</span>
-            <strong style={{ fontSize: '28px', color: 'var(--text-primary)', fontFamily: 'var(--font-display)' }}>{lenderStats.completedCount} listings</strong>
+            <strong style={{ fontSize: '28px', color: 'var(--text-primary)', fontFamily: 'var(--font-display)' }}>{completedLent.length} listings</strong>
           </div>
           <div style={{ borderLeft: '1px solid var(--border-color)', paddingLeft: '20px' }}>
             <span style={{ fontSize: '11px', color: 'var(--text-secondary)', display: 'block', fontWeight: '700' }}>MOST RENTED ITEM</span>
-            <strong style={{ fontSize: '16px', color: 'var(--text-primary)', display: 'block', marginTop: '6px' }}>{lenderStats.mostRentedItem}</strong>
+            <strong style={{ fontSize: '16px', color: 'var(--text-primary)', display: 'block', marginTop: '6px' }}>{mostRentedItem}</strong>
           </div>
         </section>
       )}
@@ -276,24 +309,19 @@ export default function History({ onViewUser, onViewItem, toast }) {
           padding: '16px 24px', 
           marginBottom: '28px', 
           display: 'grid', 
-          gridTemplateColumns: '1fr', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
           gap: '16px',
           backgroundColor: 'var(--bg-secondary)'
-        }}
-        ref={(el) => {
-          if (el) {
-            el.style.setProperty('grid-template-columns', window.innerWidth >= 768 ? '1.5fr 1fr 1fr' : '1fr');
-          }
         }}
       >
         {/* Keyword Search */}
         <div style={{ position: 'relative' }}>
-          <Search size={18} style={{ position: 'absolute', left: '12px', top: '14px', color: 'var(--text-muted)' }} />
+          <Search size={18} style={{ position: 'absolute', left: '12px', top: '12px', color: 'var(--text-muted)' }} />
           <input 
             type="text" 
             className="form-control"
             style={{ paddingLeft: '38px', height: '42px' }}
-            placeholder="Search by item name or neighbor..."
+            placeholder="Search by item or neighbor..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
@@ -329,22 +357,26 @@ export default function History({ onViewUser, onViewItem, toast }) {
         {historyList.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '64px', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: '16px' }}>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>📜</div>
-            <h3 style={{ color: 'var(--text-secondary)' }}>No completed rentals matched your parameters</h3>
+            <h3 style={{ color: 'var(--text-secondary)' }}>No completed rentals match your criteria</h3>
             <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginTop: '6px' }}>
-              Transact with neighbors nearby to start creating a secure history ledger!
+              Rent with neighbors nearby to build a rental history through completed transactions!
             </p>
           </div>
         ) : (
           historyList.map((req) => {
-            const item = db.items.find(i => i.id === req.itemId) || { name: 'Item', images: [''], category: 'General' };
-            const lender = db.users[req.lenderId] || { name: 'Lender', avatar: '' };
-            const borrower = db.users[req.borrowerId] || { name: 'Borrower', avatar: '' };
-
+            const item = req.item || { name: 'Item', images: [], category: 'General' };
             const isBorrowedTab = activeTab === 'borrowed';
-            const otherUser = isBorrowedTab ? lender : borrower;
-            
-            // Item details specific price calculation
-            const rentCostOnly = req.totalDays * (item.dailyPrice || req.totalAmount / req.totalDays);
+            const otherUser = isBorrowedTab ? req.lender : req.borrower;
+            const otherUserName = otherUser?.name || (isBorrowedTab ? 'Lender' : 'Borrower');
+            const otherUserId = otherUser?.id;
+
+            const itemImage = item.images && item.images.length > 0
+              ? resolveImageUrl(item.images[0])
+              : ITEM_PLACEHOLDER;
+
+            const reviewsList = req.reviews || [];
+            const hasReviewedItem = reviewsList.some((r) => r.targetType === 'item' && r.authorId === user?.id);
+            const hasReviewedUser = reviewsList.some((r) => r.targetType === 'user' && r.authorId === user?.id);
 
             return (
               <div 
@@ -359,48 +391,50 @@ export default function History({ onViewUser, onViewItem, toast }) {
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
-                  
-                  {/* Photo and general descriptive columns */}
+                  {/* Photo and descriptive columns */}
                   <div style={{ display: 'flex', gap: '16px' }}>
                     <button
                       type="button"
-                      onClick={() => onViewItem(item.id)}
-                      style={{ padding: 0, border: 'none', background: 'none', width: '64px', height: '64px', borderRadius: '8px', overflow: 'hidden', cursor: 'pointer' }}
+                      onClick={() => handleView(item.id)}
+                      style={{ padding: 0, border: 'none', background: 'none', width: '64px', height: '64px', borderRadius: '8px', overflow: 'hidden', cursor: 'pointer', flexShrink: 0 }}
                     >
-                      <img src={item.images[0]} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <img src={itemImage} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     </button>
                     <div>
                       <span className="badge badge-gray" style={{ fontSize: '11px', marginBottom: '4px' }}>
                         {item.category}
                       </span>
                       <h3 style={{ fontSize: '18px', fontWeight: '700' }}>
-                        <button onClick={() => onViewItem(item.id)} style={{ background: 'none', border: 'none', padding: 0, color: 'var(--text-primary)', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px' }}>
+                        <button onClick={() => handleView(item.id)} style={{ background: 'none', border: 'none', padding: 0, color: 'var(--text-primary)', cursor: 'pointer', fontWeight: 'bold', fontSize: '18px' }}>
                           {item.name}
                         </button>
                       </h3>
                       
-                      {/* Identity always visible! Click opens profile */}
                       <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <span>{isBorrowedTab ? 'Lender:' : 'Borrower:'}</span>
-                        <button 
-                          onClick={() => onViewUser(otherUser.id)} 
-                          style={{ 
-                            background: 'none', 
-                            border: 'none', 
-                            padding: 0, 
-                            color: 'var(--accent-color)', 
-                            textDecoration: 'underline', 
-                            fontWeight: '600',
-                            cursor: 'pointer'
-                          }}
-                        >
-                          {otherUser.name}
-                        </button>
+                        {otherUserId ? (
+                          <button 
+                            onClick={() => handleViewProfile(otherUserId)} 
+                            style={{ 
+                              background: 'none', 
+                              border: 'none', 
+                              padding: 0, 
+                              color: 'var(--accent-color)', 
+                              textDecoration: 'underline', 
+                              fontWeight: '600',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            {otherUserName}
+                          </button>
+                        ) : (
+                          <span>{otherUserName}</span>
+                        )}
                       </p>
                     </div>
                   </div>
 
-                  {/* Summary date ranges column */}
+                  {/* Summary date ranges */}
                   <div 
                     style={{ 
                       backgroundColor: 'var(--bg-primary)', 
@@ -427,25 +461,22 @@ export default function History({ onViewUser, onViewItem, toast }) {
                     </div>
                   </div>
 
-                  {/* Pricing ledger right side */}
+                  {/* Pricing ledger */}
                   <div style={{ textAlign: 'right' }}>
                     <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'block', fontWeight: '600' }}>
-                      {isBorrowedTab ? 'TOTAL PAID' : 'EARNED'}
+                      {isBorrowedTab ? 'TOTAL DUE' : 'EARNINGS'}
                     </span>
                     <strong style={{ fontSize: '20px', color: 'var(--accent-color)', fontFamily: 'var(--font-display)', display: 'block' }}>
-                      ₹{isBorrowedTab ? req.totalAmount : rentCostOnly}
+                      ₹{isBorrowedTab ? req.totalAmount : req.rentalAmount}
                     </strong>
-                    <span style={{ fontSize: '11px', color: 'var(--status-success)', fontWeight: '600' }}>
+                    <span style={{ fontSize: '11px', color: req.status === 'Completed' ? 'var(--status-success)' : 'var(--text-muted)', fontWeight: '600' }}>
                       {req.status}
                     </span>
                   </div>
-
                 </div>
 
-                {/* Operations: Max 2 actions per card */}
+                {/* Operations */}
                 <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }} className="no-print">
-                  
-                  {/* View receipt modal button */}
                   <button 
                     onClick={() => setSelectedReceiptRequest(req)}
                     className="btn btn-outline"
@@ -454,56 +485,52 @@ export default function History({ onViewUser, onViewItem, toast }) {
                     <FileText size={14} /> View Receipt
                   </button>
 
-                  {/* Dynamic user review triggers */}
-                  {isBorrowedTab ? (
+                  {req.status === 'Completed' && (
                     <>
-                      {/* Leave Review button if not yet submitted */}
-                      {!req.itemReviewed ? (
-                        <button 
-                          onClick={() => handleOpenReviewForm('item', item.id, item.name, req.id)}
-                          className="btn btn-primary"
-                          style={{ padding: '6px 14px', minHeight: '34px', fontSize: '13px' }}
-                        >
-                          <Star size={14} /> Leave a Review
-                        </button>
-                      ) : (
-                        <span style={{ fontSize: '13px', color: 'var(--text-muted)', alignSelf: 'center', marginLeft: '6px' }}>
-                          ★ Reviewed
-                        </span>
-                      )}
+                      {isBorrowedTab ? (
+                        <>
+                          {!hasReviewedItem ? (
+                            <button 
+                              onClick={() => handleOpenReviewForm('item', item.id, item.name, req.id)}
+                              className="btn btn-primary"
+                              style={{ padding: '6px 14px', minHeight: '34px', fontSize: '13px' }}
+                            >
+                              <Star size={14} /> Review Item
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: '13px', color: 'var(--text-muted)', alignSelf: 'center', marginLeft: '6px' }}>
+                              ★ Item Reviewed
+                            </span>
+                          )}
 
-                      {/* Rent Again pre-filling borrows */}
-                      {item.availability === 'Available' && (
-                        <button 
-                          onClick={() => onViewItem(item.id)}
-                          className="btn btn-secondary"
-                          style={{ padding: '6px 14px', minHeight: '34px', fontSize: '13px' }}
-                        >
-                          Rent Again 🔁
-                        </button>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {/* Lend: View or add review for the borrower */}
-                      {!req.userReviewed ? (
-                        <button 
-                          onClick={() => handleOpenReviewForm('user', borrower.id, borrower.name, req.id)}
-                          className="btn btn-primary"
-                          style={{ padding: '6px 14px', minHeight: '34px', fontSize: '13px' }}
-                        >
-                          <Star size={14} /> Rate Borrower
-                        </button>
+                          <button 
+                            onClick={() => handleView(item.id)}
+                            className="btn btn-secondary"
+                            style={{ padding: '6px 14px', minHeight: '34px', fontSize: '13px' }}
+                          >
+                            Rent Again 🔁
+                          </button>
+                        </>
                       ) : (
-                        <span style={{ fontSize: '13px', color: 'var(--text-muted)', alignSelf: 'center', marginLeft: '6px' }}>
-                          ★ Rated
-                        </span>
+                        <>
+                          {!hasReviewedUser ? (
+                            <button 
+                              onClick={() => handleOpenReviewForm('user', otherUserId, otherUserName, req.id)}
+                              className="btn btn-primary"
+                              style={{ padding: '6px 14px', minHeight: '34px', fontSize: '13px' }}
+                            >
+                              <Star size={14} /> Rate Borrower
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: '13px', color: 'var(--text-muted)', alignSelf: 'center', marginLeft: '6px' }}>
+                              ★ Borrower Rated
+                            </span>
+                          )}
+                        </>
                       )}
                     </>
                   )}
-
                 </div>
-
               </div>
             );
           })
@@ -514,7 +541,6 @@ export default function History({ onViewUser, onViewItem, toast }) {
       {reviewTarget && (
         <div className="modal-overlay no-print" style={{ zIndex: 1200 }}>
           <div className="modal-content" style={{ maxWidth: '460px' }}>
-            
             <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ fontSize: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Star size={18} fill="var(--status-warning)" color="var(--status-warning)" />
@@ -526,11 +552,17 @@ export default function History({ onViewUser, onViewItem, toast }) {
             </div>
 
             <form onSubmit={handleSubmitReview} style={{ padding: '24px' }}>
+              {reviewError && (
+                <div style={{ padding: '10px 14px', backgroundColor: 'rgba(239, 68, 68, 0.1)', border: '1px solid var(--status-danger)', borderRadius: '8px', color: 'var(--status-danger)', fontSize: '13px', marginBottom: '16px' }}>
+                  {reviewError}
+                </div>
+              )}
+
               <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                Share your rating and feedback for <strong style={{ color: 'var(--text-primary)' }}>{reviewTarget.name}</strong> to build neighbor trust!
+                Share your rating and feedback for <strong style={{ color: 'var(--text-primary)' }}>{reviewTarget.name}</strong> to build community trust!
               </p>
 
-              {/* Star selector buttons */}
+              {/* Star selector */}
               <div className="form-group">
                 <label className="form-label">Rating Stars</label>
                 <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', padding: '10px 0' }}>
@@ -554,14 +586,13 @@ export default function History({ onViewUser, onViewItem, toast }) {
                         size={36} 
                         fill={star <= reviewRating ? 'var(--status-warning)' : 'none'} 
                         color={star <= reviewRating ? 'var(--status-warning)' : 'var(--border-color)'}
-                        style={{ transition: 'transform 0.1s' }}
                       />
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* Comment area */}
+              {/* Comment */}
               <div className="form-group">
                 <label className="form-label" htmlFor="rev-comment">Review Comment</label>
                 <textarea 
@@ -569,7 +600,7 @@ export default function History({ onViewUser, onViewItem, toast }) {
                   className="form-control"
                   rows="3"
                   style={{ resize: 'vertical' }}
-                  placeholder="Share details of your meetup, item quality, cleanliness, and handoff experience..."
+                  placeholder="Share details of your meetup, item condition, punctuality, and overall experience..."
                   value={reviewComment}
                   onChange={(e) => setReviewComment(e.target.value)}
                   required
@@ -589,13 +620,12 @@ export default function History({ onViewUser, onViewItem, toast }) {
                   type="submit"
                   className="btn btn-primary"
                   style={{ flex: 2 }}
+                  disabled={submittingReview}
                 >
-                  Submit Review
+                  {submittingReview ? 'Submitting...' : 'Submit Review'}
                 </button>
               </div>
-
             </form>
-
           </div>
         </div>
       )}
@@ -607,7 +637,6 @@ export default function History({ onViewUser, onViewItem, toast }) {
           onClose={() => setSelectedReceiptRequest(null)}
         />
       )}
-
     </div>
   );
 }

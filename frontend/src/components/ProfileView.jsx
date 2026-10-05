@@ -1,801 +1,985 @@
-import React, { useState } from 'react';
-import { X, Award, Star, Mail, Phone, MapPin, Edit3, CheckCircle, Calendar, Upload, Link } from 'lucide-react';
-import { getDb, dbOps } from '../utils/mockDb';
+import { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { X, User, Phone, MapPin, Edit3, MessageSquare, Send, Eye, Camera, Upload, Trash2, Image as ImageIcon } from 'lucide-react';
+import { useAuth } from '../context/useAuth.js';
+import { usersApi } from '../api/users.js';
+import { uploadApi } from '../api/upload.js';
+import { messagesApi } from '../api/messages.js';
+import { geocodeApi } from '../api/geocode.js';
+import { formatRelativeTime } from '../utils/dateUtils.js';
+import { resolveImageUrl, resolveAvatarUrl, ITEM_PLACEHOLDER, AVATAR_PLACEHOLDER } from '../utils/imageUrl.js';
 
 const PRESET_AVATARS = [
-  'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=150',
-  'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=150',
-  'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=150',
-  'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=150',
-  'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&q=80&w=150'
+  AVATAR_PLACEHOLDER
 ];
 
-const FALLBACK_ADDRESSES = [
-  { name: "No. 15, 27th Main Road, HSR Layout, Sector 1, Bangalore, Karnataka", lat: 12.9100, lng: 77.6400 },
-  { name: "Flat 302, Green Glen Layout, Bellandur, Bangalore, Karnataka", lat: 12.9350, lng: 77.6750 },
-  { name: "Villa 48, Prestige Shantiniketan, Whitefield, Bangalore, Karnataka", lat: 12.9698, lng: 77.7500 },
-  { name: "Apt 501, Sobha Carnation, Sarjapur Road, Bangalore, Karnataka", lat: 12.9150, lng: 77.6500 },
-  { name: "Shanthi Nilaya, 4th Block, Jayanagar, Bangalore, Karnataka", lat: 12.9300, lng: 77.5800 },
-  { name: "Sree Nivasa, 15th Cross, JP Nagar Phase 2, Bangalore, Karnataka", lat: 12.9060, lng: 77.5900 },
-  { name: "80 Feet Road, Koramangala 4th Block, Bangalore, Karnataka", lat: 12.9350, lng: 77.6250 },
-  { name: "Golden Heights Apartment, Rajajinagar, Bangalore, Karnataka", lat: 12.9900, lng: 77.5500 },
-  { name: "14th Cross, Margosa Road, Malleshwaram, Bangalore, Karnataka", lat: 13.0030, lng: 77.5700 },
-  { name: "Lakeview Enclave, Hebbal, Bangalore, Karnataka", lat: 13.0350, lng: 77.5970 }
-];
+export default function ProfileView({ userId: propUserId, onClose = null, toast, onNavigateItem }) {
+  const { id: routeUserId } = useParams();
+  const navigate = useNavigate();
+  const { user: authUser, updateUser } = useAuth();
 
-const FALLBACK_CITIES = [
-  { name: "Bangalore, Karnataka", lat: 12.9716, lng: 77.5946 },
-  { name: "Mumbai, Maharashtra", lat: 19.0760, lng: 72.8777 },
-  { name: "Delhi, NCR", lat: 28.6139, lng: 77.2090 },
-  { name: "Hyderabad, Telangana", lat: 17.3850, lng: 78.4867 },
-  { name: "Chennai, Tamil Nadu", lat: 13.0827, lng: 80.2707 },
-  { name: "Pune, Maharashtra", lat: 18.5204, lng: 73.8567 },
-  { name: "Kolkata, West Bengal", lat: 22.5726, lng: 88.3639 },
-  { name: "Ahmedabad, Gujarat", lat: 23.0225, lng: 72.5714 },
-  { name: "Vadodara, Gujarat", lat: 22.3072, lng: 73.1812 },
-  { name: "Jaipur, Rajasthan", lat: 26.9124, lng: 75.7873 },
-  { name: "Noida, Uttar Pradesh", lat: 28.5355, lng: 77.3910 }
-];
+  const targetUserId = propUserId || routeUserId || authUser?.id;
+  const isSelf = authUser && targetUserId === authUser.id;
 
-export default function ProfileView({ userId, onClose = null, toast, onNavigateItem, onNavigatePage }) {
-  const db = getDb();
-  const activeUserId = db.currentUserId || 'user-self';
-  const resolvedUserId = userId === 'user-self' ? activeUserId : userId;
-  const profile = dbOps.getUserProfile(resolvedUserId);
-  const isSelf = resolvedUserId === activeUserId;
+  const [profile, setProfile] = useState(null);
+  const [listings, setListings] = useState([]);
+  const [reviews, setReviews] = useState([]);
+  const [isLoading, setIsLoading] = useState(Boolean(targetUserId));
+  const [error, setError] = useState(null);
 
+  // Edit Mode state
   const [isEditing, setIsEditing] = useState(false);
-  const [editName, setEditName] = useState(profile?.name || '');
-  const [editPhone, setEditPhone] = useState(profile?.phone || '');
-  const [editAddress, setEditAddress] = useState(profile?.address || '');
-  const [editCity, setEditCity] = useState(profile?.city || '');
-  const [editAvatar, setEditAvatar] = useState(profile?.avatar || PRESET_AVATARS[0]);
+  const [editName, setEditName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editPrivateAddress, setEditPrivateAddress] = useState('');
+  const [editCity, setEditCity] = useState('');
+  const [editAvatar, setEditAvatar] = useState('');
+  const [editCoords, setEditCoords] = useState({ lat: null, lng: null });
+  const [isSaving, setIsSaving] = useState(false);
 
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [filteredSuggestions, setFilteredSuggestions] = useState([]);
+  // Profile photo upload states
+  const fileInputRef = useRef(null);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [photoError, setPhotoError] = useState(null);
+  const [showUrlInput, setShowUrlInput] = useState(false);
+  const [customUrl, setCustomUrl] = useState('');
+
+  // City suggestions
+  const [citySuggestions, setCitySuggestions] = useState([]);
   const [showCitySuggestions, setShowCitySuggestions] = useState(false);
-  const [filteredCitySuggestions, setFilteredCitySuggestions] = useState([]);
-  
-  const [editCoords, setEditCoords] = useState({ lat: profile?.lat || 12.9716, lng: profile?.lng || 77.5946 });
-  const [isLoadingCity, setIsLoadingCity] = useState(false);
-  const [isLoadingAddress, setIsLoadingAddress] = useState(false);
+  const [activeCityIndex, setActiveCityIndex] = useState(-1);
 
-  // Debounced geocoding effect for user city input
-  React.useEffect(() => {
-    if (!editCity.trim()) {
-      setFilteredCitySuggestions(FALLBACK_CITIES.slice(0, 5));
-      return;
-    }
+  // Real Messaging modal state
+  const [isMessageOpen, setIsMessageOpen] = useState(false);
+  const [conversation, setConversation] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [messageInput, setMessageInput] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const messagesEndRef = useRef(null);
 
-    const exactMatch = FALLBACK_CITIES.find(c => c.name.toLowerCase() === editCity.toLowerCase());
-    if (exactMatch) {
-      setEditCoords({ lat: exactMatch.lat, lng: exactMatch.lng });
-      return;
-    }
+  useEffect(() => {
+    if (!targetUserId) return;
 
-    const delayDebounce = setTimeout(async () => {
-      setIsLoadingCity(true);
+    let isMounted = true;
+    async function loadData() {
       try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=in&limit=5&q=${encodeURIComponent(editCity)}`
-        );
-        const data = await response.json();
-        if (data && Array.isArray(data) && data.length > 0) {
-          const suggestions = data.map(item => ({
-            name: item.display_name,
-            lat: parseFloat(item.lat),
-            lng: parseFloat(item.lon)
-          }));
-          setFilteredCitySuggestions(suggestions);
-        } else {
-          const filtered = FALLBACK_CITIES.filter(c =>
-            c.name.toLowerCase().includes(editCity.toLowerCase())
-          );
-          setFilteredCitySuggestions(filtered.slice(0, 5));
+        const [profileData, listingsData, reviewsData] = await Promise.all([
+          usersApi.getProfile(targetUserId),
+          usersApi.getUserListings(targetUserId),
+          usersApi.getUserReviews(targetUserId)
+        ]);
+
+        if (isMounted) {
+          setProfile(profileData);
+          setListings(Array.isArray(listingsData) ? listingsData : (listingsData?.items || []));
+          setReviews(Array.isArray(reviewsData) ? reviewsData : (reviewsData?.reviews || []));
+
+          // Populate edit fields
+          setEditName(profileData.name || '');
+          setEditPhone(profileData.phone || '');
+          setEditPrivateAddress(profileData.privateAddress || '');
+          setEditCity(profileData.city || '');
+          setEditAvatar(profileData.avatarUrl || PRESET_AVATARS[0]);
+          setEditCoords({ lat: profileData.latitude, lng: profileData.longitude });
         }
       } catch (err) {
-        console.error("Profile city geocoding error:", err);
-        const filtered = FALLBACK_CITIES.filter(c =>
-          c.name.toLowerCase().includes(editCity.toLowerCase())
-        );
-        setFilteredCitySuggestions(filtered.slice(0, 5));
-      } finally {
-        setIsLoadingCity(false);
-      }
-    }, 400);
-
-    return () => clearTimeout(delayDebounce);
-  }, [editCity]);
-
-  // Debounced geocoding effect for user handoff address input
-  React.useEffect(() => {
-    if (!editAddress.trim()) {
-      setFilteredSuggestions(FALLBACK_ADDRESSES.slice(0, 4));
-      return;
-    }
-
-    const exactMatch = FALLBACK_ADDRESSES.find(a => a.name.toLowerCase() === editAddress.toLowerCase());
-    if (exactMatch) {
-      setEditCoords({ lat: exactMatch.lat, lng: exactMatch.lng });
-      return;
-    }
-
-    const delayDebounce = setTimeout(async () => {
-      setIsLoadingAddress(true);
-      try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=in&limit=5&q=${encodeURIComponent(`${editAddress} ${editCity}`)}`
-        );
-        const data = await response.json();
-        if (data && Array.isArray(data) && data.length > 0) {
-          const suggestions = data.map(item => ({
-            name: item.display_name,
-            lat: parseFloat(item.lat),
-            lng: parseFloat(item.lon)
-          }));
-          setFilteredSuggestions(suggestions);
-        } else {
-          const filtered = FALLBACK_ADDRESSES.filter(a =>
-            a.name.toLowerCase().includes(editAddress.toLowerCase())
-          );
-          setFilteredSuggestions(filtered.slice(0, 4));
+        if (isMounted) {
+          setError(err.message || 'Failed to load user profile');
         }
-      } catch (err) {
-        console.error("Profile address geocoding error:", err);
-        const filtered = FALLBACK_ADDRESSES.filter(a =>
-          a.name.toLowerCase().includes(editAddress.toLowerCase())
-        );
-        setFilteredSuggestions(filtered.slice(0, 4));
       } finally {
-        setIsLoadingAddress(false);
+        if (isMounted) setIsLoading(false);
       }
-    }, 400);
-
-    return () => clearTimeout(delayDebounce);
-  }, [editAddress]);
-
-  const handleAddressChange = (val) => {
-    setEditAddress(val);
-    setShowSuggestions(true);
-  };
-
-  const handleAddressFocus = () => {
-    if (!editAddress.trim()) {
-      setFilteredSuggestions(FALLBACK_ADDRESSES.slice(0, 4));
     }
-    setShowSuggestions(true);
-  };
 
-  const handleAddressBlur = () => {
-    setTimeout(() => {
-      setShowSuggestions(false);
-    }, 200);
-  };
+    loadData();
 
-  const handleCityChange = (val) => {
-    setEditCity(val);
-    setShowCitySuggestions(true);
-  };
+    return () => {
+      isMounted = false;
+    };
+  }, [targetUserId]);
 
-  const handleCityFocus = () => {
-    if (!editCity.trim()) {
-      setFilteredCitySuggestions(FALLBACK_CITIES.slice(0, 5));
+  // Debounced geocoding search for city
+  useEffect(() => {
+    if (!isEditing || !editCity.trim() || editCity.trim().length < 2) {
+      return;
     }
-    setShowCitySuggestions(true);
+
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await geocodeApi.search(editCity, controller.signal);
+        setCitySuggestions(res || []);
+      } catch {
+        // Ignored aborted
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [editCity, isEditing]);
+
+  const handlePhotoUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      setPhotoError('Image file size must be under 5MB.');
+      if (toast) toast('File size too large (max 5MB)');
+      return;
+    }
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (!allowedTypes.includes(file.type)) {
+      setPhotoError('Only JPEG, PNG, WEBP, and GIF images are supported.');
+      if (toast) toast('Please upload a valid image file (JPG, PNG, WEBP, GIF)');
+      return;
+    }
+
+    setPhotoError(null);
+    setIsUploadingPhoto(true);
+    try {
+      const res = await uploadApi.uploadImage(file);
+      setEditAvatar(res.url);
+      if (toast) toast('Profile picture uploaded successfully! 📸');
+    } catch (err) {
+      setPhotoError(err.message || 'Failed to upload photo');
+      if (toast) toast(`Upload error: ${err.message || 'Failed to upload'}`);
+    } finally {
+      setIsUploadingPhoto(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
-  const handleCityBlur = () => {
-    setTimeout(() => {
-      setShowCitySuggestions(false);
-    }, 200);
+  const handleSaveProfile = async (e) => {
+    e.preventDefault();
+    if (!editName.trim()) {
+      if (toast) toast('Name cannot be empty.');
+      return;
+    }
+
+    if (editCity.trim() && (editCoords.lat === null || editCoords.lng === null || isNaN(editCoords.lat) || isNaN(editCoords.lng))) {
+      if (toast) toast('Please select your city/neighborhood from the suggestions to set valid coordinates.');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const updateData = {
+        name: editName.trim(),
+        phone: editPhone.trim() || null,
+        privateAddress: editPrivateAddress.trim() || null,
+        city: editCity.trim() || null,
+        avatarUrl: editAvatar,
+        latitude: editCity.trim() ? editCoords.lat : null,
+        longitude: editCity.trim() ? editCoords.lng : null
+      };
+
+      const res = await usersApi.updateMe(updateData);
+      setProfile((prev) => ({ ...prev, ...res.user }));
+      updateUser(res.user);
+      setIsEditing(false);
+      if (toast) toast('Profile updated successfully! ✅');
+    } catch (err) {
+      if (toast) toast(`Error: ${err.message || 'Failed to update profile'}`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  if (!profile) {
-    return (
-      <div style={{ padding: '40px', textAlign: 'center' }}>
-        <h3>User profile not found.</h3>
+  // Open real messaging thread
+  const handleOpenMessaging = async () => {
+    if (!authUser) {
+      if (toast) toast('Please log in to message neighbors.');
+      return;
+    }
+
+    try {
+      const conv = await messagesApi.startConversation(targetUserId);
+      setConversation(conv);
+      const msgs = await messagesApi.getMessages(conv.id);
+      setMessages(Array.isArray(msgs) ? msgs : (msgs?.messages || []));
+      setIsMessageOpen(true);
+    } catch (err) {
+      if (toast) toast(`Error: ${err.message || 'Could not start conversation'}`);
+    }
+  };
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!messageInput.trim() || !conversation) return;
+
+    setIsSending(true);
+    try {
+      const newMsg = await messagesApi.sendMessage(conversation.id, messageInput.trim());
+      setMessages((prev) => [...prev, newMsg]);
+      setMessageInput('');
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 50);
+    } catch (err) {
+      if (toast) toast(`Error: ${err.message || 'Failed to send message'}`);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  if (isLoading) {
+    const loadingEl = (
+      <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+        <div style={{ display: 'inline-block', width: '32px', height: '32px', border: '3px solid var(--border-color)', borderTopColor: 'var(--accent-color)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <p style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>Loading profile...</p>
       </div>
     );
+    return onClose ? loadingEl : <div className="main-content">{loadingEl}</div>;
   }
 
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      if (file.size > 2 * 1024 * 1024) {
-        toast("Image is too large! Please select an image under 2MB. ⚠️");
-        return;
-      }
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setEditAvatar(reader.result);
-        toast("Local image loaded! Click Save to apply changes. 📸");
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const handleSaveProfile = (e) => {
-    e.preventDefault();
-    let finalLat = editCoords.lat;
-    let finalLng = editCoords.lng;
-    if (filteredSuggestions.length > 0 && finalLat === (profile?.lat || 12.9716) && finalLng === (profile?.lng || 77.5946)) {
-      finalLat = filteredSuggestions[0].lat;
-      finalLng = filteredSuggestions[0].lng;
-    }
-    dbOps.updateProfile({
-      name: editName,
-      phone: editPhone,
-      address: editAddress,
-      city: editCity,
-      avatar: editAvatar,
-      lat: finalLat,
-      lng: finalLng
-    });
-    setIsEditing(false);
-    toast('Profile updated successfully! ✨');
-  };
-
-  const handleMessageUser = () => {
-    toast(`Message thread initiated with ${profile.name}! 💬`);
-  };
-
-  const ratingAvg = profile.rating || 5.0;
-
-  return (
-    <div 
-      className="card" 
-      style={{ 
-        maxWidth: '720px', 
-        margin: '0 auto', 
-        position: 'relative',
-        animation: 'modal-appear 0.2s ease-out'
-      }}
-    >
-      {/* Close button if rendered in modal context */}
-      {onClose && (
-        <button 
-          onClick={onClose} 
-          style={{ 
-            position: 'absolute', 
-            top: '20px', 
-            right: '20px', 
-            background: 'none', 
-            border: 'none', 
-            cursor: 'pointer',
-            padding: 0
-          }}
-          title="Close profile"
+  if (error || !profile) {
+    const errorEl = (
+      <div className="card" style={{ maxWidth: '480px', margin: '40px auto', padding: '48px', textAlign: 'center' }}>
+        <h3 style={{ color: 'var(--status-danger)' }}>Profile Not Found</h3>
+        <p style={{ color: 'var(--text-secondary)', marginTop: '8px' }}>{error || 'User does not exist.'}</p>
+        <button
+          type="button"
+          onClick={() => (onClose ? onClose() : navigate(-1))}
+          className="btn btn-secondary"
+          style={{ marginTop: '16px' }}
         >
-          <X size={24} />
+          Go Back
         </button>
-      )}
+      </div>
+    );
+    return onClose ? errorEl : <div className="main-content">{errorEl}</div>;
+  }
 
-      {/* Main header layout */}
-      <div 
-        style={{ 
-          display: 'flex', 
-          flexDirection: 'column', 
-          gap: '24px', 
-          alignItems: 'center', 
-          textAlign: 'center',
-          paddingBottom: '24px',
-          borderBottom: '1px solid var(--border-color)',
-          marginBottom: '24px'
-        }}
-        ref={(el) => {
-          if (el) {
-            el.style.setProperty('flex-direction', window.innerWidth >= 600 ? 'row' : 'column');
-            el.style.setProperty('text-align', window.innerWidth >= 600 ? 'left' : 'center');
-          }
-        }}
-      >
-        {/* Avatar */}
-        <div style={{ position: 'relative' }}>
-          <img 
-            src={profile.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=150'} 
-            alt={profile.name} 
-            style={{ width: '100px', height: '100px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--accent-color)' }}
-          />
-          {profile.verified && (
-            <div 
-              style={{ 
-                position: 'absolute', 
-                bottom: '2px', 
-                right: '2px', 
-                backgroundColor: 'var(--accent-color)', 
-                color: 'white',
-                padding: '4px',
-                borderRadius: '50%',
-                display: 'flex',
-                boxShadow: 'var(--shadow-sm)'
-              }}
-              title="Verified Neighbor Trust Badge"
-            >
-              <Award size={16} />
-            </div>
-          )}
+  const ratingAvg = profile.stats?.rating ? `★ ${profile.stats.rating}` : '★ New';
+
+  const content = (
+    <div className="card" style={{ maxWidth: '1080px', margin: '0 auto', padding: '32px' }}>
+      {/* Top action row */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <User size={22} color="var(--accent-color)" />
+          <h1 style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)', margin: 0 }}>
+            {isSelf ? 'My Profile' : `${profile.name}'s Profile`}
+          </h1>
         </div>
-
-        {/* Profile metadata */}
-        <div style={{ flex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}
-               ref={(el) => {
-                 if (el) {
-                   el.style.setProperty('justify-content', window.innerWidth >= 600 ? 'flex-start' : 'center');
-                 }
-               }}
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close profile"
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--text-secondary)'
+            }}
           >
-            <h2 style={{ fontSize: '24px', fontFamily: 'var(--font-display)', fontWeight: '700' }}>
-              {isSelf ? (profile.name || 'Set Your Name') : profile.name}
-            </h2>
-            {profile.verified && (
-              <span className="badge badge-success" style={{ fontSize: '11px', padding: '2px 8px' }}>
-                Verified Neighbor
-              </span>
-            )}
-          </div>
-          
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px', color: 'var(--text-secondary)', fontSize: '14px', marginTop: '6px', flexWrap: 'wrap' }}
-               ref={(el) => {
-                 if (el) {
-                   el.style.setProperty('justify-content', window.innerWidth >= 600 ? 'flex-start' : 'center');
-                 }
-               }}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <MapPin size={16} /> {profile.city || 'Set Location'}
-            </span>
-            <span>Member since {profile.memberSince}</span>
-          </div>
-
-          {/* Core Stats Row */}
-          <div style={{ display: 'flex', gap: '20px', justifyContent: 'center', marginTop: '16px' }}
-               ref={(el) => {
-                 if (el) {
-                   el.style.setProperty('justify-content', window.innerWidth >= 600 ? 'flex-start' : 'center');
-                 }
-               }}
-          >
-            <div>
-              <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'block' }}>RATING SCORE</span>
-              <strong style={{ fontSize: '20px', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--accent-color)' }}>
-                <Star size={18} fill="var(--status-warning)" color="var(--status-warning)" />
-                {ratingAvg.toFixed(1)}
-              </strong>
-            </div>
-            <div style={{ borderLeft: '1px solid var(--border-color)', paddingLeft: '20px' }}>
-              <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'block' }}>COMPLETED RENTALS</span>
-              <strong style={{ fontSize: '20px', color: 'var(--text-primary)' }}>
-                {profile.totalCompletedRentals || 0}
-              </strong>
-            </div>
-          </div>
-        </div>
-
-        {/* Dynamic Action Buttons */}
-        <div style={{ display: 'flex', gap: '8px' }}>
-          {isSelf ? (
-            <>
-              <button 
-                onClick={() => setIsEditing(!isEditing)}
-                className="btn btn-outline"
-                style={{ alignSelf: 'center' }}
-              >
-                <Edit3 size={16} /> Edit Profile
-              </button>
-              <button 
-                onClick={() => {
-                  dbOps.logout();
-                  if (onClose) onClose();
-                }}
-                className="btn btn-outline"
-                style={{ alignSelf: 'center', borderColor: 'var(--status-danger)', color: 'var(--status-danger)' }}
-              >
-                Log Out
-              </button>
-            </>
-          ) : (
-            <button 
-              onClick={handleMessageUser}
-              className="btn btn-primary"
-              style={{ alignSelf: 'center' }}
-            >
-              Send Message 💬
-            </button>
-          )}
-        </div>
+            <X size={20} />
+          </button>
+        )}
       </div>
 
-      {/* Profile Edit Form overlay */}
-      {isSelf && isEditing && (
-        <form onSubmit={handleSaveProfile} className="no-print" style={{ backgroundColor: 'var(--bg-primary)', padding: '20px', borderRadius: '12px', border: '1px solid var(--border-color)', marginBottom: '24px' }}>
-          <h3 style={{ fontSize: '16px', marginBottom: '14px' }}>Update Profile Details</h3>
-          
-          {/* Avatar Edit Section */}
-          <div className="form-group" style={{ marginBottom: '20px' }}>
-            <label className="form-label">Profile Photo</label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', alignItems: 'center' }}>
-              
-              {/* Photo Preview */}
-              <div style={{ position: 'relative' }}>
-                <img 
-                  src={editAvatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=150'} 
-                  alt="Avatar Preview" 
-                  style={{ width: '80px', height: '80px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--accent-color)' }}
+      {isEditing ? (
+        /* Edit Form */
+        <form onSubmit={handleSaveProfile} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {/* Profile Photo Upload Section */}
+          <div
+            style={{
+              padding: '18px',
+              backgroundColor: 'var(--bg-secondary)',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border-color)',
+              marginBottom: '8px'
+            }}
+          >
+            <label className="form-label" style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <Camera size={16} color="var(--accent-color)" /> Profile Photo
+            </label>
+
+            <div style={{ display: 'flex', gap: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
+              {/* Avatar Preview */}
+              <div style={{ position: 'relative', width: '84px', height: '84px', flexShrink: 0 }}>
+                <img
+                  src={resolveAvatarUrl(editAvatar, AVATAR_PLACEHOLDER)}
+                  alt="Profile Avatar Preview"
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    borderRadius: '50%',
+                    objectFit: 'cover',
+                    border: '3px solid var(--accent-color)',
+                    backgroundColor: 'var(--bg-tertiary)'
+                  }}
+                  onError={(e) => {
+                    e.currentTarget.src = AVATAR_PLACEHOLDER;
+                  }}
                 />
-              </div>
-
-              {/* Edit Options */}
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Choose a preset or upload your own photo:</div>
-                
-                {/* Presets */}
-                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                  {PRESET_AVATARS.map((url, index) => (
-                    <button
-                      key={index}
-                      type="button"
-                      onClick={() => setEditAvatar(url)}
-                      style={{
-                        border: editAvatar === url ? '3px solid var(--accent-color)' : '1px solid var(--border-color)',
-                        borderRadius: '50%',
-                        overflow: 'hidden',
-                        padding: 0,
-                        width: '36px',
-                        height: '36px',
-                        cursor: 'pointer',
-                        transform: editAvatar === url ? 'scale(1.1)' : 'scale(1)',
-                        transition: 'transform 0.15s ease'
-                      }}
-                    >
-                      <img src={url} alt={`Preset ${index + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                    </button>
-                  ))}
-                </div>
-
-                {/* Upload & Link Options */}
-                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '4px' }}>
-                  
-                  {/* File Upload Trigger */}
-                  <label 
-                    className="btn btn-outline" 
-                    style={{ 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      gap: '6px', 
-                      padding: '6px 12px', 
-                      fontSize: '12px', 
-                      minHeight: '32px',
-                      cursor: 'pointer' 
+                {isUploadingPhoto && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      backgroundColor: 'rgba(0,0,0,0.5)',
+                      borderRadius: '50%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
                     }}
                   >
-                    <Upload size={14} /> Upload Image
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      onChange={handleFileChange} 
-                      style={{ display: 'none' }} 
-                    />
-                  </label>
-
-                  {/* Paste URL option */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: '180px' }}>
-                    <div style={{ position: 'relative', width: '100%' }}>
-                      <Link size={14} style={{ position: 'absolute', left: '10px', top: '10px', color: 'var(--text-muted)' }} />
-                      <input 
-                        type="url" 
-                        placeholder="Or paste photo link (URL)..." 
-                        value={editAvatar.startsWith('data:') ? '' : editAvatar} 
-                        onChange={(e) => setEditAvatar(e.target.value)} 
-                        className="form-control"
-                        style={{ 
-                          paddingLeft: '30px', 
-                          fontSize: '12px', 
-                          height: '32px', 
-                          paddingTop: '4px',
-                          paddingBottom: '4px'
-                        }}
-                      />
-                    </div>
+                    <div style={{ width: '22px', height: '22px', border: '2px solid white', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
                   </div>
-
-                </div>
-
+                )}
               </div>
 
+              {/* Upload Controls */}
+              <div style={{ flex: 1, minWidth: '220px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/gif"
+                    style={{ display: 'none' }}
+                    onChange={handlePhotoUpload}
+                    disabled={isUploadingPhoto || isSaving}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploadingPhoto || isSaving}
+                    className="btn btn-primary"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      fontSize: '13px',
+                      padding: '8px 14px'
+                    }}
+                  >
+                    <Upload size={15} />
+                    <span>{isUploadingPhoto ? 'Uploading...' : 'Upload Photo'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowUrlInput((prev) => !prev)}
+                    className="btn btn-secondary"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      fontSize: '13px',
+                      padding: '8px 12px'
+                    }}
+                  >
+                    <ImageIcon size={15} />
+                    <span>{showUrlInput ? 'Hide URL' : 'Image Link'}</span>
+                  </button>
+
+                  {editAvatar && editAvatar !== AVATAR_PLACEHOLDER && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditAvatar(AVATAR_PLACEHOLDER);
+                        setPhotoError(null);
+                        if (toast) toast('Photo reset to default avatar');
+                      }}
+                      className="btn-ghost"
+                      style={{
+                        color: 'var(--status-danger)',
+                        fontSize: '13px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        padding: '6px 10px'
+                      }}
+                      title="Remove custom photo and reset to default avatar"
+                    >
+                      <Trash2 size={15} />
+                      <span>Remove</span>
+                    </button>
+                  )}
+                </div>
+
+                <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  Upload a photo from your computer/device (JPG, PNG, WEBP, GIF up to 5MB).
+                </span>
+
+                {/* Optional Web URL input */}
+                {showUrlInput && (
+                  <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+                    <input
+                      type="url"
+                      className="form-control"
+                      placeholder="Paste image URL (e.g. https://...)"
+                      style={{ height: '36px', fontSize: '13px' }}
+                      value={customUrl}
+                      onChange={(e) => setCustomUrl(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ height: '36px', padding: '0 12px', fontSize: '12px', whiteSpace: 'nowrap' }}
+                      onClick={() => {
+                        if (customUrl.trim()) {
+                          setEditAvatar(customUrl.trim());
+                          setCustomUrl('');
+                          setShowUrlInput(false);
+                          if (toast) toast('Photo URL applied! 📸');
+                        }
+                      }}
+                    >
+                      Apply
+                    </button>
+                  </div>
+                )}
+
+                {photoError && (
+                  <span style={{ fontSize: '12px', color: 'var(--status-danger)', display: 'block' }}>
+                    {photoError}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 
-          <div className="form-group">
-            <label className="form-label" htmlFor="p-name">Full Name</label>
-            <input 
-              type="text" 
-              id="p-name"
-              className="form-control" 
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label" htmlFor="edit-name">
+              Full Name *
+            </label>
+            <input
+              id="edit-name"
+              type="text"
+              className="form-control"
               value={editName}
               onChange={(e) => setEditName(e.target.value)}
               required
             />
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <div className="form-group">
-              <label className="form-label" htmlFor="p-phone">Phone Number</label>
-              <input 
-                type="text" 
-                id="p-phone"
-                className="form-control" 
-                placeholder="+91 XXXXX XXXXX"
-                value={editPhone}
-                onChange={(e) => setEditPhone(e.target.value)}
-              />
-            </div>
-            <div className="form-group" style={{ position: 'relative' }}>
-              <label className="form-label" htmlFor="p-city">City, State</label>
-              <input 
-                type="text"
-                id="p-city"
-                className="form-control"
-                placeholder="e.g., Mumbai, Maharashtra"
-                value={editCity}
-                onChange={(e) => handleCityChange(e.target.value)}
-                onFocus={handleCityFocus}
-                onBlur={handleCityBlur}
-                autoComplete="off"
-              />
-              
-              {/* City suggestions dropdown */}
-              {showCitySuggestions && (filteredCitySuggestions.length > 0 || isLoadingCity) && (
-                <ul 
-                  style={{
-                    position: 'absolute',
-                    top: '100%',
-                    left: 0,
-                    right: 0,
-                    backgroundColor: 'var(--bg-primary)',
-                    border: '1px solid var(--border-color)',
-                    borderRadius: '8px',
-                    boxShadow: 'var(--shadow-md)',
-                    zIndex: 10,
-                    margin: '4px 0 0 0',
-                    padding: '6px 0',
-                    listStyle: 'none',
-                    maxHeight: '180px',
-                    overflowY: 'auto'
-                  }}
-                >
-                  {isLoadingCity && (
-                    <li style={{ padding: '8px 12px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                      <span>🔍 Searching India cities...</span>
-                    </li>
-                  )}
-                  {filteredCitySuggestions.map((c, index) => (
-                    <li key={index}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditCity(c.name);
-                          setEditCoords({ lat: c.lat, lng: c.lng });
-                          setShowCitySuggestions(false);
-                          toast(`City set to ${c.name.split(',')[0]}! 🌆`);
-                        }}
-                        style={{
-                          width: '100%',
-                          textAlign: 'left',
-                          padding: '8px 12px',
-                          border: 'none',
-                          background: 'none',
-                          fontSize: '13px',
-                          color: 'var(--text-primary)',
-                          cursor: 'pointer',
-                          display: 'block',
-                          transition: 'background-color 0.15s ease',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          overflow: 'hidden'
-                        }}
-                        onMouseEnter={(e) => e.target.style.backgroundColor = 'var(--bg-secondary)'}
-                        onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
-                      >
-                        🌆 <strong>{c.name.split(',')[0]}</strong> <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{c.name.split(',').slice(1).join(',')}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label" htmlFor="edit-phone">
+              Phone Number
+            </label>
+            <input
+              id="edit-phone"
+              type="tel"
+              className="form-control"
+              placeholder="+91 98765 43210"
+              value={editPhone}
+              onChange={(e) => setEditPhone(e.target.value)}
+            />
           </div>
 
-          <div className="form-group" style={{ position: 'relative' }}>
-            <label className="form-label" htmlFor="p-addr">Handoff/Pickup Address</label>
-            <input 
-              type="text" 
-              id="p-addr"
-              className="form-control" 
-              placeholder="Start typing or select a nearby address suggestion..."
-              value={editAddress}
-              onChange={(e) => handleAddressChange(e.target.value)}
-              onFocus={handleAddressFocus}
-              onBlur={handleAddressBlur}
-              autoComplete="off"
+          <div className="form-group" style={{ margin: 0, position: 'relative' }}>
+            <label className="form-label" htmlFor="edit-city">
+              City / Neighborhood
+            </label>
+            <input
+              id="edit-city"
+              type="text"
+              role="combobox"
+              aria-expanded={showCitySuggestions && citySuggestions.length > 0}
+              aria-autocomplete="list"
+              aria-controls="profile-city-suggestions"
+              aria-activedescendant={activeCityIndex >= 0 ? `profile-city-opt-${activeCityIndex}` : undefined}
+              className="form-control"
+              placeholder="e.g. Indiranagar, Bengaluru"
+              value={editCity}
+              onChange={(e) => {
+                setEditCity(e.target.value);
+                // Immediately invalidate old coordinates when location text changes
+                setEditCoords({ lat: null, lng: null });
+                if (e.target.value.trim().length < 2) {
+                  setCitySuggestions([]);
+                }
+                setShowCitySuggestions(true);
+                setActiveCityIndex(-1);
+              }}
+              onKeyDown={(e) => {
+                if (!showCitySuggestions || citySuggestions.length === 0) {
+                  if (e.key === 'ArrowDown' && citySuggestions.length > 0) {
+                    setShowCitySuggestions(true);
+                    setActiveCityIndex(0);
+                    e.preventDefault();
+                  }
+                  return;
+                }
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setActiveCityIndex((prev) => (prev < citySuggestions.length - 1 ? prev + 1 : 0));
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setActiveCityIndex((prev) => (prev > 0 ? prev - 1 : citySuggestions.length - 1));
+                } else if (e.key === 'Enter') {
+                  if (activeCityIndex >= 0 && citySuggestions[activeCityIndex]) {
+                    e.preventDefault();
+                    const s = citySuggestions[activeCityIndex];
+                    setEditCity(s.city || s.label);
+                    setEditCoords({ lat: s.latitude, lng: s.longitude });
+                    setShowCitySuggestions(false);
+                    setActiveCityIndex(-1);
+                  }
+                } else if (e.key === 'Escape') {
+                  setShowCitySuggestions(false);
+                  setActiveCityIndex(-1);
+                }
+              }}
+              onFocus={() => setShowCitySuggestions(true)}
             />
-            
-            {/* Auto-Suggestion Dropdown */}
-            {showSuggestions && (filteredSuggestions.length > 0 || isLoadingAddress) && (
-              <ul 
+            {showCitySuggestions && citySuggestions.length > 0 && (
+              <ul
+                id="profile-city-suggestions"
+                role="listbox"
                 style={{
                   position: 'absolute',
                   top: '100%',
                   left: 0,
                   right: 0,
-                  backgroundColor: 'var(--bg-primary)',
+                  backgroundColor: 'var(--bg-secondary)',
                   border: '1px solid var(--border-color)',
                   borderRadius: '8px',
                   boxShadow: 'var(--shadow-md)',
-                  zIndex: 10,
-                  margin: '4px 0 0 0',
-                  padding: '6px 0',
+                  maxHeight: '160px',
+                  overflowY: 'auto',
+                  zIndex: 20,
                   listStyle: 'none',
-                  maxHeight: '200px',
-                  overflowY: 'auto'
+                  padding: '4px 0',
+                  margin: '4px 0 0 0'
                 }}
               >
-                <li style={{ padding: '4px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                  {isLoadingAddress ? "Searching Address..." : "Suggested Nearby Addresses"}
-                </li>
-                {filteredSuggestions.map((addr, index) => (
-                  <li key={index}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditAddress(addr.name);
-                        setEditCoords({ lat: addr.lat, lng: addr.lng });
-                        setShowSuggestions(false);
-                        toast("Address applied! 📍");
-                      }}
-                      style={{
-                        width: '100%',
-                        textAlign: 'left',
-                        padding: '10px 12px',
-                        border: 'none',
-                        background: 'none',
-                        fontSize: '13px',
-                        color: 'var(--text-primary)',
-                        cursor: 'pointer',
-                        display: 'block',
-                        transition: 'background-color 0.15s ease',
-                        whiteSpace: 'nowrap',
-                        textOverflow: 'ellipsis',
-                        overflow: 'hidden'
-                      }}
-                      onMouseEnter={(e) => e.target.style.backgroundColor = 'var(--bg-secondary)'}
-                      onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
-                    >
-                      📍 <strong>{addr.name.split(',')[0]}</strong> <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{addr.name.split(',').slice(1).join(',')}</span>
-                    </button>
+                {citySuggestions.map((s, idx) => (
+                  <li
+                    key={idx}
+                    id={`profile-city-opt-${idx}`}
+                    role="option"
+                    aria-selected={idx === activeCityIndex}
+                    style={{
+                      padding: '8px 12px',
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                      backgroundColor: idx === activeCityIndex ? 'var(--bg-hover, rgba(0,0,0,0.06))' : 'transparent',
+                      color: 'var(--text-primary)'
+                    }}
+                    onMouseDown={() => {
+                      setEditCity(s.city || s.label);
+                      setEditCoords({ lat: s.latitude, lng: s.longitude });
+                      setShowCitySuggestions(false);
+                      setActiveCityIndex(-1);
+                    }}
+                  >
+                    {s.label}
                   </li>
                 ))}
               </ul>
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: '12px' }}>
-            <button 
-              type="button" 
-              onClick={() => setIsEditing(false)} 
-              className="btn btn-outline"
-              style={{ flex: 1 }}
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label" htmlFor="edit-private-address">
+              Private Home Address (Kept strictly private, never visible publicly)
+            </label>
+            <input
+              id="edit-private-address"
+              type="text"
+              className="form-control"
+              placeholder="Flat / House number, Street name"
+              value={editPrivateAddress}
+              onChange={(e) => setEditPrivateAddress(e.target.value)}
+            />
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '12px' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => {
+                setIsEditing(false);
+                setEditAvatar(profile?.avatarUrl || AVATAR_PLACEHOLDER);
+                setPhotoError(null);
+                setShowUrlInput(false);
+              }}
+              disabled={isSaving || isUploadingPhoto}
             >
               Cancel
             </button>
-            <button 
-              type="submit" 
-              className="btn btn-primary"
-              style={{ flex: 2 }}
-            >
-              Save Profile Changes
+            <button type="submit" className="btn btn-primary" disabled={isSaving || isUploadingPhoto}>
+              {isSaving ? 'Saving...' : 'Save Profile'}
             </button>
           </div>
         </form>
-      )}
-
-      {/* Phone and address display in personal view */}
-      {isSelf && !isEditing && (profile.phone || profile.address) && (
-        <div style={{ backgroundColor: 'var(--bg-primary)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)', marginBottom: '24px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-          <div>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'block', fontWeight: '600' }}>PHONE NUMBER</span>
-            <strong style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{profile.phone || 'Not added'}</strong>
-          </div>
-          <div>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'block', fontWeight: '600' }}>PICKUP ADDRESS</span>
-            <strong style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{profile.address || 'Not added'}</strong>
-          </div>
-        </div>
-      )}
-
-      {/* Bottom tabs section */}
-      <h3 style={{ fontSize: '18px', marginBottom: '14px', borderBottom: '2px solid var(--border-color)', paddingBottom: '8px' }}>
-        {isSelf ? 'My Active Listings' : `Currently Lending by ${profile.name.split(' ')[0]}`}
-      </h3>
-
-      {profile.listings.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '40px 0', border: '1px dashed var(--border-color)', borderRadius: '12px' }}>
-          <p style={{ color: 'var(--text-secondary)' }}>No active items listed at the moment.</p>
-          {isSelf && (
-            <button 
-              onClick={() => onNavigatePage('my-items')}
-              className="btn btn-primary" 
-              style={{ marginTop: '16px' }}
-            >
-              Add Your First Item
-            </button>
-          )}
-        </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '16px' }}>
-          {profile.listings.map((item) => (
-            <div 
-              key={item.id} 
-              className="card" 
-              style={{ padding: '0', display: 'flex', flexDirection: 'column', overflow: 'hidden', cursor: 'pointer' }}
-              onClick={() => {
-                if (onNavigateItem) {
-                  onNavigateItem(item.id);
-                  if (onClose) onClose();
-                }
+        /* Profile Display */
+        <>
+          <div style={{ display: 'flex', gap: '24px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            <img
+              src={resolveAvatarUrl(profile.avatarUrl, AVATAR_PLACEHOLDER)}
+              alt={profile.name}
+              style={{ width: '88px', height: '88px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--accent-color)' }}
+              onError={(e) => {
+                e.currentTarget.src = AVATAR_PLACEHOLDER;
               }}
-            >
-              <img src={item.images[0]} alt={item.name} style={{ width: '100%', height: '120px', objectFit: 'cover' }} />
-              <div style={{ padding: '12px' }}>
-                <span className={`badge ${item.availability === 'Available' ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: '10px', padding: '2px 6px', marginBottom: '6px' }}>
-                  {item.availability}
+            />
+
+            <div style={{ flex: 1, minWidth: '220px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <h3 style={{ fontSize: '24px', fontWeight: '800', margin: 0 }}>{profile.name}</h3>
+                <span
+                  style={{
+                    backgroundColor: 'var(--accent-color-light)',
+                    color: 'var(--accent-color)',
+                    padding: '2px 8px',
+                    borderRadius: '12px',
+                    fontSize: '12px',
+                    fontWeight: '700'
+                  }}
+                >
+                  {ratingAvg}
                 </span>
-                <h4 style={{ fontSize: '14px', fontWeight: '600', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                  {item.name}
-                </h4>
-                <strong style={{ color: 'var(--accent-color)', fontSize: '14px', display: 'block', marginTop: '4px' }}>
-                  ₹{item.dailyPrice}<span style={{ fontSize: '10px', fontWeight: 'normal', color: 'var(--text-secondary)' }}>/day</span>
-                </strong>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', fontSize: '13px', marginTop: '6px' }}>
+                <MapPin size={14} color="var(--accent-color)" />
+                <span>{profile.city || 'Neighborhood Neighbor'}</span>
+              </div>
+
+              {profile.phone && isSelf && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', fontSize: '13px', marginTop: '4px' }}>
+                  <Phone size={14} />
+                  <span>{profile.phone}</span>
+                </div>
+              )}
+
+              {isSelf && profile.privateAddress && (
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  Private Address: <em>{profile.privateAddress}</em>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '16px', marginTop: '16px' }}>
+                <div style={{ textAlign: 'center' }}>
+                  <span style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-primary)', display: 'block' }}>
+                    {profile.stats?.itemsCount || 0}
+                  </span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Listings</span>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <span style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-primary)', display: 'block' }}>
+                    {profile.stats?.completedLends || 0}
+                  </span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Items Lent</span>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <span style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-primary)', display: 'block' }}>
+                    {profile.stats?.completedBorrows || 0}
+                  </span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Borrowed</span>
+                </div>
               </div>
             </div>
-          ))}
-        </div>
-      )}
 
-      {/* Reviews log Section */}
-      <h3 style={{ fontSize: '18px', marginTop: '32px', marginBottom: '14px', borderBottom: '2px solid var(--border-color)', paddingBottom: '8px' }}>
-        Neighbor Reviews ({profile.reviews.length})
-      </h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {isSelf ? (
+                <button
+                  type="button"
+                  onClick={() => setIsEditing(true)}
+                  className="btn btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '14px' }}
+                >
+                  <Edit3 size={16} /> Edit Profile
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleOpenMessaging}
+                  className="btn btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '14px' }}
+                >
+                  <MessageSquare size={16} /> Send Message
+                </button>
+              )}
+            </div>
+          </div>
 
-      {profile.reviews.length === 0 ? (
-        <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>
-          No reviews yet. Be the first to transact and review!
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {profile.reviews.map((rev, idx) => (
-            <div key={idx} style={{ padding: '16px', border: '1px solid var(--border-color)', borderRadius: '12px', backgroundColor: 'var(--bg-primary)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <strong style={{ fontSize: '14px' }}>{rev.reviewerName || 'Anonymous Neighbor'}</strong>
-                <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{rev.date}</span>
-              </div>
-              <div style={{ display: 'flex', gap: '2px', margin: '4px 0' }}>
-                {[1, 2, 3, 4, 5].map((star) => (
-                  <Star 
-                    key={star} 
-                    size={14} 
-                    fill={star <= rev.rating ? 'var(--status-warning)' : 'none'} 
-                    color={star <= rev.rating ? 'var(--status-warning)' : 'var(--border-color)'} 
-                  />
+          {/* User Listings */}
+          <section style={{ marginTop: '36px' }}>
+            <h4 style={{ fontSize: '16px', fontWeight: '700', marginBottom: '16px' }}>
+              Listings by {isSelf ? 'You' : profile.name} ({listings.length})
+            </h4>
+            {listings.length === 0 ? (
+              <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No active listings published yet.</p>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '16px' }}>
+                {listings.map((item) => (
+                  <div
+                    key={item.id}
+                    className="card"
+                    style={{
+                      padding: '14px',
+                      borderRadius: 'var(--radius-md)',
+                      border: '1px solid var(--border-color)',
+                      display: 'flex',
+                      flexDirection: 'column'
+                    }}
+                  >
+                    <div
+                      style={{
+                        position: 'relative',
+                        width: '100%',
+                        height: '140px',
+                        backgroundColor: 'var(--bg-tertiary)',
+                        borderRadius: 'var(--radius-sm)',
+                        overflow: 'hidden',
+                        border: '1px solid var(--border-color)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <img
+                        src={resolveImageUrl(item.images?.[0], ITEM_PLACEHOLDER)}
+                        alt={item.name}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover',
+                          filter: 'contrast(1.08) brightness(1.08)'
+                        }}
+                        onError={(e) => {
+                          e.currentTarget.src = ITEM_PLACEHOLDER;
+                        }}
+                      />
+                    </div>
+                    <h5 style={{ fontSize: '14px', fontWeight: '600', margin: '10px 0 4px 0', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                      {item.name}
+                    </h5>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'auto' }}>
+                      <span style={{ fontSize: '13px', fontWeight: '700', color: 'var(--accent-color)' }}>
+                        ₹{item.dailyPrice}/day
+                      </span>
+                      <span className={`badge ${item.availability === 'Available' ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: '11px', padding: '2px 8px' }}>
+                        {item.availability || 'Available'}
+                      </span>
+                    </div>
+
+                    {/* Explicit Item Actions */}
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                      {isSelf ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => navigate('/my-items')}
+                            className="btn btn-outline"
+                            style={{ flex: 1, height: '34px', minHeight: '34px', fontSize: '12px', padding: '4px 8px', gap: '4px' }}
+                            aria-label={`Manage ${item.name}`}
+                          >
+                            <Edit3 size={14} /> Manage
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (onNavigateItem) onNavigateItem(item.id);
+                              else navigate(`/items/${item.id}`);
+                            }}
+                            className="btn btn-primary"
+                            style={{ flex: 1, height: '34px', minHeight: '34px', fontSize: '12px', padding: '4px 8px', gap: '4px' }}
+                            aria-label={`View ${item.name}`}
+                          >
+                            <Eye size={14} /> View
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onNavigateItem) onNavigateItem(item.id);
+                            else navigate(`/items/${item.id}`);
+                          }}
+                          className="btn btn-primary"
+                          style={{ width: '100%', height: '34px', minHeight: '34px', fontSize: '12px', padding: '4px 8px', gap: '6px' }}
+                          aria-label={`View details for ${item.name}`}
+                        >
+                          <Eye size={14} /> View Details
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 ))}
               </div>
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                "{rev.comment}"
-              </p>
+            )}
+          </section>
+
+          {/* User Reviews */}
+          <section style={{ marginTop: '36px' }}>
+            <h4 style={{ fontSize: '16px', fontWeight: '700', marginBottom: '16px' }}>
+              Reviews Received ({reviews.length})
+            </h4>
+            {reviews.length === 0 ? (
+              <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>No neighbor reviews yet.</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {reviews.map((rev) => (
+                  <div
+                    key={rev.id}
+                    style={{
+                      padding: '14px',
+                      backgroundColor: 'var(--bg-primary)',
+                      borderRadius: '12px',
+                      border: '1px solid var(--border-color)'
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                      <span style={{ fontWeight: '600', fontSize: '13px' }}>{rev.author?.name || 'Neighbor'}</span>
+                      <span style={{ color: 'var(--status-warning)', fontWeight: '700', fontSize: '13px' }}>
+                        {'★'.repeat(rev.rating)}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
+                      {rev.comment}
+                    </p>
+                    <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px', display: 'block' }}>
+                      {formatRelativeTime(rev.createdAt)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
+      {/* Real Messaging Modal */}
+      {isMessageOpen && (
+        <div
+          className="modal-overlay"
+          style={{ zIndex: 1200 }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="messaging-modal-title"
+        >
+          <div
+            className="modal-content"
+            style={{
+              maxWidth: '480px',
+              height: '520px',
+              display: 'flex',
+              flexDirection: 'column',
+              padding: 0,
+              overflow: 'hidden'
+            }}
+          >
+            {/* Header */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '16px 20px',
+                borderBottom: '1px solid var(--border-color)',
+                backgroundColor: 'var(--bg-secondary)'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <MessageSquare size={18} color="var(--accent-color)" />
+                <h3 id="messaging-modal-title" style={{ fontSize: '16px', fontWeight: '700', margin: 0 }}>
+                  Message {profile.name}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMessageOpen(false)}
+                aria-label="Close messages"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)' }}
+              >
+                <X size={18} />
+              </button>
             </div>
-          ))}
+
+            {/* Message log */}
+            <div style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {messages.length === 0 ? (
+                <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px', margin: 'auto' }}>
+                  Send a message to coordinate pickup, ask questions, or discuss rental details.
+                </div>
+              ) : (
+                messages.map((m) => {
+                  const isSentByMe = authUser && m.senderId === authUser.id;
+                  return (
+                    <div
+                      key={m.id}
+                      style={{
+                        alignSelf: isSentByMe ? 'flex-end' : 'flex-start',
+                        maxWidth: '80%',
+                        padding: '10px 14px',
+                        borderRadius: isSentByMe ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                        backgroundColor: isSentByMe ? 'var(--accent-color)' : 'var(--bg-tertiary)',
+                        color: isSentByMe ? 'white' : 'var(--text-primary)',
+                        fontSize: '13px',
+                        lineHeight: 1.4
+                      }}
+                    >
+                      <div>{m.body}</div>
+                      <div
+                        style={{
+                          fontSize: '10px',
+                          color: isSentByMe ? 'rgba(255,255,255,0.7)' : 'var(--text-muted)',
+                          marginTop: '4px',
+                          textAlign: 'right'
+                        }}
+                      >
+                        {formatRelativeTime(m.createdAt)}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input bar */}
+            <form
+              onSubmit={handleSendMessage}
+              style={{
+                display: 'flex',
+                gap: '8px',
+                padding: '12px 16px',
+                borderTop: '1px solid var(--border-color)',
+                backgroundColor: 'var(--bg-secondary)'
+              }}
+            >
+              <input
+                type="text"
+                className="form-control"
+                placeholder="Type your message..."
+                style={{ flex: 1, height: '40px' }}
+                value={messageInput}
+                onChange={(e) => setMessageInput(e.target.value)}
+                disabled={isSending}
+              />
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={isSending || !messageInput.trim()}
+                style={{ height: '40px', padding: '0 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
+              >
+                <Send size={15} />
+              </button>
+            </form>
+          </div>
         </div>
       )}
+    </div>
+  );
+
+  if (onClose) {
+    return content;
+  }
+
+  return (
+    <div className="main-content">
+      {content}
     </div>
   );
 }
