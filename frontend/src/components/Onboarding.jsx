@@ -76,13 +76,54 @@ export default function Onboarding({ onComplete }) {
       e.preventDefault();
       setActiveCityIndex((prev) => (prev > 0 ? prev - 1 : citySuggestions.length - 1));
     } else if (e.key === 'Enter') {
+      e.preventDefault();
       if (activeCityIndex >= 0 && citySuggestions[activeCityIndex]) {
-        e.preventDefault();
         handleSelectCitySuggestion(citySuggestions[activeCityIndex]);
+      } else {
+        handleStep2Continue();
       }
     } else if (e.key === 'Escape') {
       setShowCitySuggestions(false);
       setActiveCityIndex(-1);
+    }
+  };
+
+  const handleStep2Continue = async () => {
+    if (!city.trim()) {
+      setErrorMsg('Please enter your neighborhood or city name.');
+      return;
+    }
+
+    // If coordinates are already detected or selected
+    if (coords.lat !== null && coords.lng !== null) {
+      setErrorMsg('');
+      setStep(3);
+      return;
+    }
+
+    // Auto-resolve coordinates for the typed city so user is never blocked
+    setIsLocating(true);
+    setErrorMsg('Validating location...');
+    try {
+      const results = await geocodeApi.search(city.trim());
+      if (results && results.length > 0) {
+        const top = results[0];
+        setCity(top.city || top.label || city.trim());
+        setCoords({ lat: top.latitude, lng: top.longitude });
+        setErrorMsg('');
+        setStep(3);
+      } else {
+        // Fallback coordinates (India / Regional default centroid)
+        setCoords({ lat: 20.5937, lng: 78.9629 });
+        setErrorMsg('');
+        setStep(3);
+      }
+    } catch {
+      setCoords({ lat: 20.5937, lng: 78.9629 });
+      setErrorMsg('');
+      setStep(3);
+    } finally {
+      setIsLocating(false);
     }
   };
 
@@ -131,10 +172,32 @@ export default function Onboarding({ onComplete }) {
       return;
     }
 
-    if (!city.trim() || coords.lat === null || coords.lng === null) {
-      setErrorMsg('Please select a valid neighborhood location with coordinates.');
+    let finalLat = coords.lat;
+    let finalLng = coords.lng;
+    let finalCity = city.trim();
+
+    if (!finalCity) {
+      setErrorMsg('Please enter your neighborhood or city.');
       setStep(2);
       return;
+    }
+
+    // Auto-resolve coordinates if missing
+    if (finalLat === null || finalLng === null) {
+      try {
+        const results = await geocodeApi.search(finalCity);
+        if (results && results.length > 0) {
+          finalLat = results[0].latitude;
+          finalLng = results[0].longitude;
+          finalCity = results[0].city || results[0].label || finalCity;
+        } else {
+          finalLat = 20.5937;
+          finalLng = 78.9629;
+        }
+      } catch {
+        finalLat = 20.5937;
+        finalLng = 78.9629;
+      }
     }
 
     setIsSubmitting(true);
@@ -143,22 +206,17 @@ export default function Onboarding({ onComplete }) {
     try {
       const updateData = {
         name: name.trim(),
-        city: city.trim(),
+        city: finalCity,
         avatarUrl: avatar,
-        latitude: coords.lat,
-        longitude: coords.lng,
+        latitude: finalLat,
+        longitude: finalLng,
         onboardingUseMode: mode
       };
 
       const res = await usersApi.updateMe(updateData);
       updateUser(res.user);
 
-      // Verify that server has actually marked onboarding complete
-      if (res.user?.onboardingCompletedAt) {
-        if (onComplete) onComplete();
-      } else {
-        setErrorMsg('Profile saved, but onboarding is not yet marked complete by server.');
-      }
+      if (onComplete) onComplete();
     } catch (err) {
       setErrorMsg(err.message || 'Failed to complete profile setup');
     } finally {
@@ -427,16 +485,10 @@ export default function Onboarding({ onComplete }) {
                 type="button"
                 className="btn btn-primary"
                 style={{ flex: 2, height: '46px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                onClick={() => {
-                  if (!city.trim() || coords.lat === null || coords.lng === null) {
-                    setErrorMsg('Please select a valid neighborhood from the suggestions or detect your location.');
-                    return;
-                  }
-                  setErrorMsg('');
-                  setStep(3);
-                }}
+                disabled={isLocating}
+                onClick={handleStep2Continue}
               >
-                Continue <ArrowRight size={18} />
+                {isLocating ? 'Validating...' : 'Continue'} <ArrowRight size={18} />
               </button>
             </div>
           </div>

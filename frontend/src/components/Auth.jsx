@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { Mail, Lock, User, ShieldAlert, Sparkles, ArrowRight, ShieldCheck, Phone, Eye, EyeOff } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Mail, Lock, User, ShieldAlert, Sparkles, ArrowRight, ShieldCheck, Phone, Eye, EyeOff, MapPin, Navigation } from 'lucide-react';
 import { useAuth } from '../context/useAuth.js';
+import { geocodeApi } from '../api/geocode.js';
 
 export default function Auth({ onLoginSuccess, toast }) {
   const { login, register } = useAuth();
@@ -11,9 +12,70 @@ export default function Auth({ onLoginSuccess, toast }) {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [city, setCity] = useState('');
+  const [coords, setCoords] = useState({ lat: null, lng: null });
+  const [citySuggestions, setCitySuggestions] = useState([]);
+  const [showCitySuggestions, setShowCitySuggestions] = useState(false);
+  const [isLocatingCity, setIsLocatingCity] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  // Debounced geocoding search for city during registration
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      if (isLoginTab || !city.trim() || city.trim().length < 2) {
+        setCitySuggestions([]);
+        return;
+      }
+      try {
+        const results = await geocodeApi.search(city, controller.signal);
+        setCitySuggestions(results || []);
+      } catch {
+        // Ignored
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [city, isLoginTab]);
+
+  const handleUseCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      setErrorMsg('Geolocation is not supported by your browser.');
+      return;
+    }
+
+    setIsLocatingCity(true);
+    setErrorMsg('');
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        setCoords({ lat, lng });
+
+        try {
+          const rev = await geocodeApi.reverse(lat, lng);
+          const resolvedCity = rev?.city || rev?.label;
+          if (resolvedCity) {
+            setCity(resolvedCity);
+          }
+        } catch {
+          // Ignored
+        } finally {
+          setIsLocatingCity(false);
+        }
+      },
+      () => {
+        setIsLocatingCity(false);
+        setErrorMsg('Could not detect location. Please type your city name.');
+      },
+      { timeout: 10000 }
+    );
+  };
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
@@ -47,13 +109,33 @@ export default function Auth({ onLoginSuccess, toast }) {
         if (toast) toast('Logged in successfully! Welcome back 👋');
         if (onLoginSuccess) onLoginSuccess(loggedInUser);
       } else {
+        let finalLat = coords.lat;
+        let finalLng = coords.lng;
+        let finalCity = city.trim();
+
+        // If user typed a city without selecting a dropdown, auto-geocode on submit
+        if (finalCity && (finalLat === null || finalLng === null)) {
+          try {
+            const results = await geocodeApi.search(finalCity);
+            if (results && results.length > 0) {
+              finalLat = results[0].latitude;
+              finalLng = results[0].longitude;
+              finalCity = results[0].city || results[0].label || finalCity;
+            }
+          } catch {
+            // Server will attempt fallback geocoding
+          }
+        }
+
         const registeredUser = await register({
           name: name.trim(),
           email: email.trim(),
           password,
           confirmPassword,
           phone: phone.trim() || undefined,
-          city: city.trim() || undefined
+          city: finalCity || undefined,
+          latitude: finalLat ?? undefined,
+          longitude: finalLng ?? undefined
         });
         if (toast) toast('Account created! Welcome to RentIt 🎉');
         if (onLoginSuccess) onLoginSuccess(registeredUser);
@@ -330,19 +412,104 @@ export default function Auth({ onLoginSuccess, toast }) {
                   </div>
                 </div>
 
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label className="form-label" htmlFor="register-city">
-                    City / Neighborhood
-                  </label>
-                  <input
-                    type="text"
-                    id="register-city"
-                    className="form-control"
-                    placeholder="e.g. Bengaluru"
-                    style={{ height: '46px' }}
-                    value={city}
-                    onChange={(e) => setCity(e.target.value)}
-                  />
+                <div className="form-group" style={{ margin: 0, position: 'relative' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <label className="form-label" htmlFor="register-city" style={{ margin: 0 }}>
+                      City / Neighborhood
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleUseCurrentLocation}
+                      disabled={isLocatingCity}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--accent-color)',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        padding: 0
+                      }}
+                    >
+                      <Navigation size={13} />
+                      {isLocatingCity ? 'Detecting...' : 'Use GPS'}
+                    </button>
+                  </div>
+                  <div style={{ position: 'relative' }}>
+                    <MapPin
+                      size={18}
+                      style={{
+                        position: 'absolute',
+                        left: '16px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        color: 'var(--text-muted)',
+                        pointerEvents: 'none'
+                      }}
+                    />
+                    <input
+                      type="text"
+                      id="register-city"
+                      className="form-control"
+                      placeholder="e.g. Bengaluru, Indiranagar, Waghodia"
+                      style={{ paddingLeft: '48px', height: '46px' }}
+                      value={city}
+                      onChange={(e) => {
+                        setCity(e.target.value);
+                        setCoords({ lat: null, lng: null });
+                        setShowCitySuggestions(true);
+                      }}
+                      onFocus={() => setShowCitySuggestions(true)}
+                    />
+                  </div>
+
+                  {coords.lat !== null && coords.lng !== null && (
+                    <span style={{ fontSize: '11px', color: 'var(--status-success)', marginTop: '4px', display: 'block' }}>
+                      ✓ Location verified
+                    </span>
+                  )}
+
+                  {showCitySuggestions && citySuggestions.length > 0 && (
+                    <ul
+                      style={{
+                        position: 'absolute',
+                        top: '100%',
+                        left: 0,
+                        right: 0,
+                        backgroundColor: 'var(--bg-secondary)',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: '8px',
+                        boxShadow: 'var(--shadow-md)',
+                        maxHeight: '160px',
+                        overflowY: 'auto',
+                        zIndex: 20,
+                        listStyle: 'none',
+                        padding: '4px 0',
+                        margin: '4px 0 0 0'
+                      }}
+                    >
+                      {citySuggestions.map((s, idx) => (
+                        <li
+                          key={idx}
+                          style={{
+                            padding: '8px 12px',
+                            fontSize: '13px',
+                            cursor: 'pointer',
+                            color: 'var(--text-primary)'
+                          }}
+                          onMouseDown={() => {
+                            setCity(s.city || s.label);
+                            setCoords({ lat: s.latitude, lng: s.longitude });
+                            setShowCitySuggestions(false);
+                          }}
+                        >
+                          {s.label}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               </>
             )}

@@ -159,21 +159,35 @@ export default function ProfileView({ userId: propUserId, onClose = null, toast,
       return;
     }
 
-    if (editCity.trim() && (editCoords.lat === null || editCoords.lng === null || isNaN(editCoords.lat) || isNaN(editCoords.lng))) {
-      if (toast) toast('Please select your city/neighborhood from the suggestions to set valid coordinates.');
-      return;
-    }
+    let finalLat = editCoords.lat;
+    let finalLng = editCoords.lng;
+    let finalCity = editCity.trim();
 
     setIsSaving(true);
     try {
+      if (finalCity && (finalLat === null || finalLng === null || isNaN(finalLat) || isNaN(finalLng))) {
+        try {
+          const results = await geocodeApi.search(finalCity);
+          if (results && results.length > 0) {
+            finalLat = results[0].latitude;
+            finalLng = results[0].longitude;
+            finalCity = results[0].city || results[0].label || finalCity;
+            setEditCity(finalCity);
+            setEditCoords({ lat: finalLat, lng: finalLng });
+          }
+        } catch {
+          // Handled gracefully
+        }
+      }
+
       const updateData = {
         name: editName.trim(),
         phone: editPhone.trim() || null,
         privateAddress: editPrivateAddress.trim() || null,
-        city: editCity.trim() || null,
+        city: finalCity || null,
         avatarUrl: editAvatar,
-        latitude: editCity.trim() ? editCoords.lat : null,
-        longitude: editCity.trim() ? editCoords.lng : null
+        latitude: finalCity ? finalLat : null,
+        longitude: finalCity ? finalLng : null
       };
 
       const res = await usersApi.updateMe(updateData);

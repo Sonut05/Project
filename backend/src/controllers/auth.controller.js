@@ -21,7 +21,7 @@ export function hashToken(token) {
 
 export async function register(req, res, next) {
   try {
-    const { name, email, password, confirmPassword, phone, city } = req.body;
+    const { name, email, password, confirmPassword, phone, city, latitude, longitude } = req.body;
 
     if (!name || typeof name !== 'string' || name.trim().length < 2) {
       throw new ValidationError('Name must be at least 2 characters long.');
@@ -49,6 +49,40 @@ export async function register(req, res, next) {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
+    let userLat = null;
+    let userLng = null;
+    if (latitude !== undefined && latitude !== null && longitude !== undefined && longitude !== null) {
+      const parsedLat = parseFloat(latitude);
+      const parsedLng = parseFloat(longitude);
+      if (!isNaN(parsedLat) && !isNaN(parsedLng) && parsedLat >= -90 && parsedLat <= 90 && parsedLng >= -180 && parsedLng <= 180) {
+        userLat = parsedLat;
+        userLng = parsedLng;
+      }
+    }
+
+    // If city is provided but coordinates weren't passed, attempt server geocoding
+    if (city && city.trim() && userLat === null) {
+      try {
+        const geocodeUrl = new URL(config.geocoderUrl);
+        geocodeUrl.searchParams.set('q', city.trim());
+        geocodeUrl.searchParams.set('format', 'json');
+        geocodeUrl.searchParams.set('limit', '1');
+        const geoRes = await fetch(geocodeUrl.toString(), {
+          headers: { 'User-Agent': config.geocoderUserAgent, Accept: 'application/json' },
+          signal: AbortSignal.timeout(3000)
+        });
+        if (geoRes.ok) {
+          const geoData = await geoRes.json();
+          if (Array.isArray(geoData) && geoData.length > 0) {
+            userLat = parseFloat(geoData[0].lat);
+            userLng = parseFloat(geoData[0].lon);
+          }
+        }
+      } catch (geoErr) {
+        console.warn('[Register] Geocode lookup skipped:', geoErr.message);
+      }
+    }
+
     const user = await prisma.user.create({
       data: {
         name: name.trim(),
@@ -56,6 +90,9 @@ export async function register(req, res, next) {
         passwordHash,
         phone: phone ? phone.trim() : null,
         city: city ? city.trim() : null,
+        latitude: userLat,
+        longitude: userLng,
+        onboardingCompletedAt: (userLat !== null && userLng !== null) ? new Date() : null,
         avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name.trim())}`
       }
     });

@@ -199,7 +199,29 @@ export async function updateMe(req, res, next) {
         dataToUpdate.latitude === undefined &&
         dataToUpdate.longitude === undefined
       ) {
-        throw new ValidationError('Updating your city or neighborhood requires selecting a location from suggestions.');
+        try {
+          const { config } = await import('../config/env.js');
+          const geocodeUrl = new URL(config.geocoderUrl);
+          geocodeUrl.searchParams.set('q', city.trim());
+          geocodeUrl.searchParams.set('format', 'json');
+          geocodeUrl.searchParams.set('limit', '1');
+          const geoRes = await fetch(geocodeUrl.toString(), {
+            headers: { 'User-Agent': config.geocoderUserAgent, Accept: 'application/json' },
+            signal: AbortSignal.timeout(3000)
+          });
+          if (geoRes.ok) {
+            const geoData = await geoRes.json();
+            if (Array.isArray(geoData) && geoData.length > 0) {
+              dataToUpdate.latitude = parseFloat(geoData[0].lat);
+              dataToUpdate.longitude = parseFloat(geoData[0].lon);
+            }
+          }
+        } catch (geoErr) {
+          console.warn('[updateMe] Auto-geocode fallback skipped:', geoErr.message);
+        }
+        if (dataToUpdate.latitude === undefined || dataToUpdate.longitude === undefined) {
+          throw new ValidationError('Updating your city or neighborhood requires selecting a location from suggestions.');
+        }
       }
     }
 

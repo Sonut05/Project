@@ -23,7 +23,7 @@ export function errorHandler(err, req, res, next) {
   }
 
   // Handle CORS rejection
-  if (err.message === 'Not allowed by CORS') {
+  if (err.message && err.message.includes('Not allowed by CORS')) {
     statusCode = 403;
     code = 'CORS_FORBIDDEN';
     message = 'Not allowed by CORS';
