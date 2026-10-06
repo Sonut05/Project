@@ -27,10 +27,10 @@ app.use(
   })
 );
 
-// CORS configuration using CLIENT_ORIGIN (supporting comma-separated origins)
+// CORS configuration using CLIENT_ORIGIN (supporting comma-separated origins, stripping trailing slashes)
 const configuredOrigins = (config.clientOrigin || '')
   .split(',')
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
 const isProduction = config.env === 'production';
@@ -48,11 +48,20 @@ app.use(
   cors({
     origin: (origin, callback) => {
       // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
+      if (!origin) {
+        return callback(null, true);
       }
+
+      const normalizedOrigin = origin.replace(/\/+$/, '');
+      if (
+        allowedOrigins.includes('*') ||
+        allowedOrigins.includes(normalizedOrigin) ||
+        allowedOrigins.length === 0 ||
+        (!isProduction && (normalizedOrigin.includes('localhost') || normalizedOrigin.includes('127.0.0.1')))
+      ) {
+        return callback(null, true);
+      }
+      callback(new Error(`Not allowed by CORS: ${origin}`));
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
